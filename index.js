@@ -1,1 +1,1 @@
-index.js
+const { Client, GatewayIntentBits } = require("discord.js");
