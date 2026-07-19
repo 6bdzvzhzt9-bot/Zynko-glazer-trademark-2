@@ -20,9 +20,11 @@ app.get("/", (req, res) => {
 
 app.listen(process.env.PORT || 3000);
 
+
 // Files
 const SETUP_FILE = "./setup.json";
 const CLAIM_FILE = "./claims.json";
+
 
 if (!fs.existsSync(SETUP_FILE)) {
   fs.writeFileSync(SETUP_FILE, "{}");
@@ -32,7 +34,8 @@ if (!fs.existsSync(CLAIM_FILE)) {
   fs.writeFileSync(CLAIM_FILE, "{}");
 }
 
-// Bot
+
+// Discord bot
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -41,16 +44,19 @@ const client = new Client({
   ]
 });
 
+
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
 
+// Messages
 client.on("messageCreate", async (message) => {
+
   if (message.author.bot) return;
 
 
-  // Create ticket button
+  // Open ticket command
   if (message.content === "!ticket") {
 
     const button = new ButtonBuilder()
@@ -58,13 +64,16 @@ client.on("messageCreate", async (message) => {
       .setLabel("🎟️ Open Ticket")
       .setStyle(ButtonStyle.Primary);
 
+
     const row = new ActionRowBuilder()
       .addComponents(button);
+
 
     message.channel.send({
       content: "Click below to open a support ticket.",
       components: [row]
     });
+
   }
 
 
@@ -75,28 +84,32 @@ client.on("messageCreate", async (message) => {
       logsChannel: message.channel.id
     };
 
+
     fs.writeFileSync(
       SETUP_FILE,
       JSON.stringify(setup, null, 2)
     );
 
+
     message.reply(
-      `✅ Setup complete!\n\n📄 Transcripts: ${message.channel}\n🏆 Leaderboard: ${message.channel}`
+      `✅ Setup complete!\n📄 Transcripts: ${message.channel}\n🏆 Leaderboard: ${message.channel}`
     );
+
   }
 
 
-  // Claim command
+  // Claim command starts here
   if (message.content === "!claim") {
 
     if (!message.channel.name.startsWith("ticket-")) {
+
       return message.reply(
         "❌ This command can only be used inside a ticket."
       );
+
     }
 
 
-    // Make transcript
     const messages = await message.channel.messages.fetch({
       limit: 100
     });
@@ -110,52 +123,71 @@ client.on("messageCreate", async (message) => {
       .join("\n");
 
 
-    const fileName = `${message.channel.name}-transcript.txt`;
+    const fileName =
+      `${message.channel.name}-transcript.txt`;
 
-    fs.writeFileSync(fileName, transcript);
+
+    fs.writeFileSync(
+      fileName,
+      transcript
+    );
 
 
-    // Send transcript
     const setup = JSON.parse(
       fs.readFileSync(SETUP_FILE)
     );
 
 
-    const logsChannel = message.guild.channels.cache.get(
-      setup.logsChannel
-    );
+    const logsChannel =
+      message.guild.channels.cache.get(setup.logsChannel);
 
 
     if (logsChannel) {
 
-      const file = new AttachmentBuilder(fileName);
+      const file =
+        new AttachmentBuilder(fileName);
+
 
       logsChannel.send({
         content:
-        `📄 Transcript\n\nTicket: **${message.channel.name}**\nClaimed by: ${message.author}`,
+        `📄 Transcript\nTicket: **${message.channel.name}**\nClaimed by: ${message.author}`,
         files: [file]
       });
 
+      }
+          // Payment detection (ticket name only)
+    let payment = 0;
+
+    const ticketName = message.channel.name.toLowerCase();
+
+    if (ticketName.includes("dono-")) {
+      payment = 0.50;
+    } 
+    else if (ticketName.includes("ingame")) {
+      payment = 0.30;
+    } 
+    else if (ticketName.includes("mod-map")) {
+      payment = 3.00;
     }
 
 
-    // Leaderboard
+    // Update leaderboard
     let claims = JSON.parse(
       fs.readFileSync(CLAIM_FILE)
     );
 
 
     if (!claims[message.author.id]) {
-
       claims[message.author.id] = {
         name: message.author.username,
-        amount: 0
+        claims: 0,
+        money: 0
       };
-
     }
 
 
-    claims[message.author.id].amount++;
+    claims[message.author.id].claims += 1;
+    claims[message.author.id].money += payment;
 
 
     fs.writeFileSync(
@@ -164,24 +196,29 @@ client.on("messageCreate", async (message) => {
     );
 
 
+    // Create leaderboard
     const leaderboard = Object.values(claims)
-      .sort((a,b) => b.amount - a.amount)
-      .slice(0,10)
-      .map((u,i)=>
-        `${i+1}. ${u.name} - ${u.amount} claims`
+      .sort((a, b) => b.money - a.money)
+      .slice(0, 10)
+      .map((user, index) =>
+`${index + 1}. ${user.name}
+🎟️ Claims: ${user.claims}
+💰 Earned: $${user.money.toFixed(2)}`
       )
-      .join("\n");
+      .join("\n\n");
 
 
     if (logsChannel) {
       logsChannel.send(
-        `🏆 Claim Leaderboard\n\n${leaderboard}`
+`🏆 Claim Leaderboard
+
+${leaderboard}`
       );
     }
 
 
     message.reply(
-      "✅ Ticket claimed and transcript saved."
+      `✅ Ticket claimed!\n💰 Payment added: $${payment.toFixed(2)}`
     );
 
   }
@@ -189,7 +226,7 @@ client.on("messageCreate", async (message) => {
 });
 
 
-
+// Ticket button system
 client.on("interactionCreate", async (interaction) => {
 
   if (!interaction.isButton()) return;
