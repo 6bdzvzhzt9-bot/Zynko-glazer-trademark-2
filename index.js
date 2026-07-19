@@ -100,8 +100,7 @@ client.on("messageCreate", async (message) => {
 
   // Claim command starts here
   if (message.content === "!claim") {
-
-    if (!message.channel.name.startsWith("ticket-")) {
+      if (!message.channel.name.startsWith("ticket-")) {
 
       return message.reply(
         "❌ This command can only be used inside a ticket."
@@ -154,8 +153,9 @@ client.on("messageCreate", async (message) => {
         files: [file]
       });
 
-      }
-          // Payment detection (ticket name only)
+    }
+
+
     let payment = 0;
 
     const ticketName = message.channel.name.toLowerCase();
@@ -171,7 +171,6 @@ client.on("messageCreate", async (message) => {
     }
 
 
-    // Update leaderboard
     let claims = JSON.parse(
       fs.readFileSync(CLAIM_FILE)
     );
@@ -196,7 +195,6 @@ client.on("messageCreate", async (message) => {
     );
 
 
-    // Create leaderboard
     const leaderboard = Object.values(claims)
       .sort((a, b) => b.money - a.money)
       .slice(0, 10)
@@ -223,6 +221,29 @@ ${leaderboard}`
 
   }
 
+
+  // Info command
+  if (message.content === "!info") {
+    message.reply(`
+🤖 **Bot Commands**
+
+🎟️ !ticket
+• Opens a support ticket.
+
+⚙️ !setup
+• Sets the transcript + leaderboard channel.
+
+📋 !claim
+• Claims a ticket.
+• Saves transcript.
+• Adds payment.
+• Updates leaderboard.
+
+ℹ️ !info
+• Shows this command list.
+`);
+  }
+
 });
 
 
@@ -234,16 +255,13 @@ client.on("interactionCreate", async (interaction) => {
 
   if (interaction.customId === "open_ticket") {
 
-
     const channel = await interaction.guild.channels.create({
 
       name: `ticket-${interaction.user.username}`,
 
       type: ChannelType.GuildText,
 
-
       permissionOverwrites: [
-
         {
           id: interaction.guild.id,
           deny: [
@@ -258,7 +276,6 @@ client.on("interactionCreate", async (interaction) => {
             PermissionsBitField.Flags.SendMessages
           ]
         }
-
       ]
 
     });
