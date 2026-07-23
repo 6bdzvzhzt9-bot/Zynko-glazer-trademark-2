@@ -251,6 +251,44 @@ if (message.content === "!backup create") {
 console.log(backups);
   message.reply("✅ Server backup saved!");
 }
+// Restore command
+if (message.content === "!backup restore") {
+
+  const backups = JSON.parse(
+    fs.readFileSync(BACKUP_FILE)
+  );
+
+  const backup = backups[message.guild.id];
+
+  if (!backup) {
+    return message.reply("❌ No backup found!");
+  }
+
+  for (const role of backup.roles) {
+    if (role.name !== "@everyone") {
+      await message.guild.roles.create({
+        name: role.name,
+        permissions: role.permissions
+      });
+    }
+  }
+
+  for (const channel of backup.channels) {
+
+    const exists = message.guild.channels.cache.find(
+      c => c.name === channel.name
+    );
+
+    if (!exists) {
+      await message.guild.channels.create({
+        name: channel.name,
+        type: channel.type
+      });
+    }
+  }
+
+  message.reply("✅ Server restore complete!");
+}
   // Info command
   if (message.content === "!info") {
     message.reply(`
