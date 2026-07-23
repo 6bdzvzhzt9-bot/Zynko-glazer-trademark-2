@@ -248,7 +248,7 @@ if (message.content === "!backup create") {
     BACKUP_FILE,
     JSON.stringify(backups, null, 2)
   );
-
+console.log(backups);
   message.reply("✅ Server backup saved!");
 }
   // Info command
