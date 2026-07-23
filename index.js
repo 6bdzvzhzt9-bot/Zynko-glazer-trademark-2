@@ -33,7 +33,9 @@ if (!fs.existsSync(SETUP_FILE)) {
 if (!fs.existsSync(CLAIM_FILE)) {
   fs.writeFileSync(CLAIM_FILE, "{}");
 }
-
+if (!fs.existsSync(BACKUP_FILE)) {
+  fs.writeFileSync(BACKUP_FILE, "{}");
+}
 
 // Discord bot
 const client = new Client({
