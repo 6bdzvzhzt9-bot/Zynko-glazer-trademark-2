@@ -24,7 +24,7 @@ app.listen(process.env.PORT || 3000);
 // Files
 const SETUP_FILE = "./setup.json";
 const CLAIM_FILE = "./claims.json";
-
+const BACKUP_FILE = "./backups.json";
 
 if (!fs.existsSync(SETUP_FILE)) {
   fs.writeFileSync(SETUP_FILE, "{}");
