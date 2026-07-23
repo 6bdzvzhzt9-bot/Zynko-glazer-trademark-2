@@ -223,7 +223,34 @@ ${leaderboard}`
 
   }
 
+// Backup command
+if (message.content === "!backup create") {
 
+  const backup = {
+    server: message.guild.name,
+    roles: message.guild.roles.cache.map(role => ({
+      name: role.name,
+      permissions: role.permissions.toArray()
+    })),
+    channels: message.guild.channels.cache.map(channel => ({
+      name: channel.name,
+      type: channel.type
+    }))
+  };
+
+  let backups = JSON.parse(
+    fs.readFileSync(BACKUP_FILE)
+  );
+
+  backups[message.guild.id] = backup;
+
+  fs.writeFileSync(
+    BACKUP_FILE,
+    JSON.stringify(backups, null, 2)
+  );
+
+  message.reply("✅ Server backup saved!");
+}
   // Info command
   if (message.content === "!info") {
     message.reply(`
