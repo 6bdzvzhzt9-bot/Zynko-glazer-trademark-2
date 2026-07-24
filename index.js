@@ -32,7 +32,6 @@ const SETUP_FILE = "./setup.json";
 const CLAIM_FILE = "./claims.json";
 const BACKUP_FILE = "./backups.json";
 const CUSTOM_FILE = "./custom.json";
-const LOG_FILE = "./logs.json";
 const MAINTENANCE_FILE = "./maintenance.json";
 
 
@@ -41,7 +40,6 @@ for (const file of [
   CLAIM_FILE,
   BACKUP_FILE,
   CUSTOM_FILE,
-  LOG_FILE,
   MAINTENANCE_FILE
 ]) {
 
@@ -63,7 +61,7 @@ const client = new Client({
 });
 
 
-// Slash commands
+// Slash Commands
 const commands = [
 
   new SlashCommandBuilder()
@@ -73,7 +71,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Setup bot channels"),
+    .setDescription("Setup bot logs"),
 
 
   new SlashCommandBuilder()
@@ -82,50 +80,28 @@ const commands = [
 
 
   new SlashCommandBuilder()
+    .setName("storesetup")
+    .setDescription("Create store server"),
+
+
+  new SlashCommandBuilder()
     .setName("backup")
-    .setDescription("Backup server")
+    .setDescription("Server backup")
     .addSubcommand(sub =>
       sub
         .setName("create")
-        .setDescription("Create a backup")
+        .setDescription("Create backup")
     )
     .addSubcommand(sub =>
       sub
         .setName("restore")
-        .setDescription("Restore a backup")
+        .setDescription("Restore backup")
     ),
 
 
   new SlashCommandBuilder()
     .setName("customize")
-    .setDescription("Customize bot settings")
-    .addStringOption(option =>
-      option
-        .setName("type")
-        .setDescription("Setting to change")
-        .setRequired(true)
-        .addChoices(
-          {
-            name: "Nickname",
-            value: "nickname"
-          },
-          {
-            name: "Status",
-            value: "status"
-          }
-        )
-    )
-    .addStringOption(option =>
-      option
-        .setName("value")
-        .setDescription("New value")
-        .setRequired(true)
-    ),
-
-
-  new SlashCommandBuilder()
-    .setName("botinfo")
-    .setDescription("Show bot settings"),
+    .setDescription("Customize bot"),
 
 
   new SlashCommandBuilder()
@@ -134,30 +110,23 @@ const commands = [
 
 
   new SlashCommandBuilder()
+    .setName("botinfo")
+    .setDescription("Show bot info"),
+
+
+  new SlashCommandBuilder()
     .setName("announce")
-    .setDescription("Send an announcement")
-    .addStringOption(option =>
-      option
-        .setName("message")
-        .setDescription("Announcement text")
-        .setRequired(true)
-    ),
+    .setDescription("Send announcement"),
 
 
   new SlashCommandBuilder()
     .setName("broadcast")
-    .setDescription("Send a bot message")
-    .addStringOption(option =>
-      option
-        .setName("message")
-        .setDescription("Message")
-        .setRequired(true)
-    ),
+    .setDescription("Send bot message"),
 
 
   new SlashCommandBuilder()
     .setName("maintenance")
-    .setDescription("Toggle maintenance mode"),
+    .setDescription("Toggle maintenance"),
 
 
   new SlashCommandBuilder()
@@ -186,7 +155,7 @@ client.once("ready", async () => {
   );
 
 
-  console.log("Slash commands registered");
+  console.log("Commands loaded!");
 
 });
 client.on("interactionCreate", async (interaction) => {
@@ -195,6 +164,7 @@ client.on("interactionCreate", async (interaction) => {
 
 
   const command = interaction.commandName;
+
 
 
   // /info
@@ -206,10 +176,11 @@ client.on("interactionCreate", async (interaction) => {
 🎟️ /ticket
 ⚙️ /setup
 📋 /claim
+🛒 /storesetup
 💾 /backup
 🎨 /customize
-👤 /botinfo
 📊 /stats
+👤 /botinfo
 📢 /announce
 📡 /broadcast
 🔧 /maintenance
@@ -219,183 +190,157 @@ client.on("interactionCreate", async (interaction) => {
 
 
 
-  // /customize
-  if (command === "customize") {
+  // /storesetup
+  if (command === "storesetup") {
 
-    const type =
-      interaction.options.getString("type");
-
-    const value =
-      interaction.options.getString("value");
+    await interaction.deferReply();
 
 
-    let custom = JSON.parse(
-      fs.readFileSync(CUSTOM_FILE)
-    );
+    const roles = [
+      "Owner",
+      "Manager",
+      "Developer",
+      "Support Team",
+      "Customer",
+      "Bots"
+    ];
 
 
-    if (!custom[interaction.guild.id]) {
-      custom[interaction.guild.id] = {};
+    const categories = {
+
+      "📌 INFORMATION": [
+        "welcome",
+        "rules",
+        "announcements"
+      ],
+
+      "🛒 STORE": [
+        "store-menu",
+        "pricing",
+        "reviews"
+      ],
+
+      "🎟️ ORDERS": [
+        "create-ticket",
+        "active-orders",
+        "completed-orders"
+      ],
+
+      "💬 COMMUNITY": [
+        "general",
+        "suggestions"
+      ],
+
+      "🛠️ SUPPORT": [
+        "help",
+        "bug-reports"
+      ],
+
+      "👑 STAFF": [
+        "staff-chat",
+        "order-logs",
+        "staff-logs"
+      ]
+
+    };
+
+
+    let rolesCreated = 0;
+
+
+    for (const roleName of roles) {
+
+      const exists =
+        interaction.guild.roles.cache.find(
+          r => r.name === roleName
+        );
+
+
+      if (!exists) {
+
+        await interaction.guild.roles.create({
+          name: roleName
+        });
+
+        rolesCreated++;
+
+      }
+
     }
 
 
-    custom[interaction.guild.id][type] = value;
+
+    let channelsCreated = 0;
 
 
-    fs.writeFileSync(
-      CUSTOM_FILE,
-      JSON.stringify(custom,null,2)
-    );
+    for (const categoryName in categories) {
 
 
-    if (type === "nickname") {
+      let category =
+        interaction.guild.channels.cache.find(
+          c =>
+          c.name === categoryName &&
+          c.type === ChannelType.GuildCategory
+        );
 
-      await interaction.guild.members.me.setNickname(value);
+
+      if (!category) {
+
+        category =
+        await interaction.guild.channels.create({
+
+          name: categoryName,
+
+          type: ChannelType.GuildCategory
+
+        });
+
+      }
+
+
+
+      for (const channelName of categories[categoryName]) {
+
+
+        const exists =
+          interaction.guild.channels.cache.find(
+            c => c.name === channelName
+          );
+
+
+        if (!exists) {
+
+          await interaction.guild.channels.create({
+
+            name: channelName,
+
+            type: ChannelType.GuildText,
+
+            parent: category.id
+
+          });
+
+
+          channelsCreated++;
+
+        }
+
+      }
 
     }
 
 
-    if (type === "status") {
-
-      client.user.setActivity(value, {
-        type: ActivityType.Playing
-      });
-
-    }
-
-
-    return interaction.reply(
-      `✅ Updated ${type}: ${value}`
+    return interaction.editReply(
+      `✅ Store server created!\n\n` +
+      `👑 Roles created: ${rolesCreated}\n` +
+      `📁 Channels created: ${channelsCreated}`
     );
 
   }
 
 
 
-  // /botinfo
-  if (command === "botinfo") {
-
-    const custom = JSON.parse(
-      fs.readFileSync(CUSTOM_FILE)
-    );
-
-
-    const settings =
-      custom[interaction.guild.id] || {};
-
-
-    return interaction.reply(`
-🤖 **Bot Info**
-
-Nickname:
-${settings.nickname || "Default"}
-
-Status:
-${settings.status || "Default"}
-    `);
-
-  }
-
-
-
-  // /stats
-  if (command === "stats") {
-
-    const claims = JSON.parse(
-      fs.readFileSync(CLAIM_FILE)
-    );
-
-
-    let total = 0;
-
-
-    for (const user in claims) {
-      total += claims[user].claims;
-    }
-
-
-    return interaction.reply(`
-📊 **Bot Stats**
-
-🎟️ Total Claims:
-${total}
-
-👥 Staff Tracked:
-${Object.keys(claims).length}
-    `);
-
-  }
-
-
-
-  // /announce
-  if (command === "announce") {
-
-    const message =
-      interaction.options.getString("message");
-
-
-    await interaction.channel.send(
-      `📢 **Announcement**\n\n${message}`
-    );
-
-
-    return interaction.reply({
-      content: "✅ Announcement sent!",
-      ephemeral: true
-    });
-
-  }
-
-
-
-  // /broadcast
-  if (command === "broadcast") {
-
-    const message =
-      interaction.options.getString("message");
-
-
-    await interaction.channel.send(message);
-
-
-    return interaction.reply({
-      content: "✅ Broadcast sent!",
-      ephemeral: true
-    });
-
-  }
-
-
-
-  // /maintenance
-  if (command === "maintenance") {
-
-    let maintenance = JSON.parse(
-      fs.readFileSync(MAINTENANCE_FILE)
-    );
-
-
-    maintenance[interaction.guild.id] =
-      !maintenance[interaction.guild.id];
-
-
-    fs.writeFileSync(
-      MAINTENANCE_FILE,
-      JSON.stringify(maintenance,null,2)
-    );
-
-
-    return interaction.reply(
-      `🔧 Maintenance mode: ${
-        maintenance[interaction.guild.id]
-        ? "ON"
-        : "OFF"
-      }`
-    );
-
-  }
-    // /ticket
+  // /ticket
   if (command === "ticket") {
 
     const button = new ButtonBuilder()
@@ -409,8 +354,12 @@ ${Object.keys(claims).length}
 
 
     return interaction.reply({
-      content: "Click below to open a ticket.",
-      components: [row]
+
+      content:
+      "Click below to open a support ticket.",
+
+      components:[row]
+
     });
 
   }
@@ -421,7 +370,10 @@ ${Object.keys(claims).length}
   if (command === "setup") {
 
     const setup = {
-      logsChannel: interaction.channel.id
+
+      logsChannel:
+      interaction.channel.id
+
     };
 
 
@@ -436,35 +388,43 @@ ${Object.keys(claims).length}
     );
 
   }
-
-
-
-  // /claim
+    // /claim
   if (command === "claim") {
+
 
     if (!interaction.channel.name.startsWith("ticket-")) {
 
       return interaction.reply({
-        content: "❌ Use this inside a ticket.",
-        ephemeral: true
+
+        content:
+        "❌ Use this inside a ticket.",
+
+        ephemeral:true
+
       });
 
     }
 
 
+
     await interaction.deferReply();
+
 
 
     const messages =
       await interaction.channel.messages.fetch({
-        limit: 100
+
+        limit:100
+
       });
+
 
 
     const transcript =
       messages
       .sort((a,b) =>
-        a.createdTimestamp - b.createdTimestamp
+        a.createdTimestamp -
+        b.createdTimestamp
       )
       .map(msg =>
         `[${msg.author.username}] ${msg.content}`
@@ -472,8 +432,10 @@ ${Object.keys(claims).length}
       .join("\n");
 
 
+
     const fileName =
-      `${interaction.channel.name}-transcript.txt`;
+    `${interaction.channel.name}-transcript.txt`;
+
 
 
     fs.writeFileSync(
@@ -482,15 +444,19 @@ ${Object.keys(claims).length}
     );
 
 
-    const setup = JSON.parse(
+
+    const setup =
+    JSON.parse(
       fs.readFileSync(SETUP_FILE)
     );
 
 
+
     const logs =
-      interaction.guild.channels.cache.get(
-        setup.logsChannel
-      );
+    interaction.guild.channels.cache.get(
+      setup.logsChannel
+    );
+
 
 
     if (logs) {
@@ -498,7 +464,7 @@ ${Object.keys(claims).length}
       logs.send({
 
         content:
-        `📄 Transcript\n${interaction.channel.name}\nClaimed by ${interaction.user}`,
+        `📄 Transcript\nTicket: ${interaction.channel.name}\nClaimed by: ${interaction.user}`,
 
         files:[
           new AttachmentBuilder(fileName)
@@ -509,28 +475,45 @@ ${Object.keys(claims).length}
     }
 
 
-    let claims = JSON.parse(
+
+    let claims =
+    JSON.parse(
       fs.readFileSync(CLAIM_FILE)
     );
+
 
 
     if (!claims[interaction.user.id]) {
 
       claims[interaction.user.id] = {
-        name: interaction.user.username,
-        claims: 0
+
+        name:
+        interaction.user.username,
+
+        claims:0
+
       };
 
     }
 
 
+
     claims[interaction.user.id].claims++;
 
 
+
     fs.writeFileSync(
+
       CLAIM_FILE,
-      JSON.stringify(claims,null,2)
+
+      JSON.stringify(
+        claims,
+        null,
+        2
+      )
+
     );
+
 
 
     return interaction.editReply(
@@ -541,49 +524,77 @@ ${Object.keys(claims).length}
 
 
 
+
   // /backup
   if (command === "backup") {
 
+
     const type =
-      interaction.options.getSubcommand();
+    interaction.options.getSubcommand();
 
 
 
     if (type === "create") {
 
+
       const backup = {
+
+        server:
+        interaction.guild.name,
+
 
         roles:
         interaction.guild.roles.cache.map(role => ({
+
           name: role.name,
-          permissions: role.permissions.toArray()
+
+          permissions:
+          role.permissions.toArray()
+
         })),
+
 
         channels:
         interaction.guild.channels.cache.map(channel => ({
+
           name: channel.name,
+
           type: channel.type
+
         }))
 
       };
 
 
-      let backups = JSON.parse(
+
+      let backups =
+      JSON.parse(
         fs.readFileSync(BACKUP_FILE)
       );
 
 
-      backups[interaction.guild.id] = backup;
+
+      backups[interaction.guild.id] =
+      backup;
+
 
 
       fs.writeFileSync(
+
         BACKUP_FILE,
-        JSON.stringify(backups,null,2)
+
+        JSON.stringify(
+          backups,
+          null,
+          2
+        )
+
       );
 
 
+
       return interaction.reply(
-        "✅ Backup saved!"
+        "✅ Server backup saved!"
       );
 
     }
@@ -592,16 +603,21 @@ ${Object.keys(claims).length}
 
     if (type === "restore") {
 
+
       await interaction.deferReply();
 
 
-      const backups = JSON.parse(
+
+      const backups =
+      JSON.parse(
         fs.readFileSync(BACKUP_FILE)
       );
 
 
+
       const backup =
-        backups[interaction.guild.id];
+      backups[interaction.guild.id];
+
 
 
       if (!backup) {
@@ -613,9 +629,16 @@ ${Object.keys(claims).length}
       }
 
 
+
+      let roles = 0;
+      let channels = 0;
+
+
+
       for (const role of backup.roles) {
 
         if (role.name !== "@everyone") {
+
 
           const exists =
           interaction.guild.roles.cache.find(
@@ -623,22 +646,28 @@ ${Object.keys(claims).length}
           );
 
 
+
           if (!exists) {
 
             await interaction.guild.roles.create({
+
               name: role.name,
-              permissions: role.permissions
+
+              permissions:
+              role.permissions
+
             });
+
+
+            roles++;
 
           }
 
         }
 
       }
+            for (const channel of backup.channels) {
 
-
-
-      for (const channel of backup.channels) {
 
         const exists =
         interaction.guild.channels.cache.find(
@@ -649,67 +678,93 @@ ${Object.keys(claims).length}
         if (!exists) {
 
           await interaction.guild.channels.create({
+
             name: channel.name,
+
             type: channel.type
+
           });
+
+
+          channels++;
 
         }
 
       }
 
 
+
       return interaction.editReply(
-        "✅ Restore complete!"
+
+        `✅ Restore complete!\n\n🛡️ Roles: ${roles}\n📁 Channels: ${channels}`
+
       );
 
     }
 
   }
 
+
 });
 
 
 
-// Ticket button
+
+// Ticket button system
 client.on("interactionCreate", async (interaction) => {
 
+
   if (!interaction.isButton()) return;
+
 
 
   if (interaction.customId === "open_ticket") {
 
 
+
     const channel =
     await interaction.guild.channels.create({
 
+
       name:
       `ticket-${interaction.user.username}`,
+
 
       type:
       ChannelType.GuildText,
 
 
+
       permissionOverwrites:[
 
+
         {
+
           id: interaction.guild.id,
 
           deny:[
+
             PermissionsBitField.Flags.ViewChannel
+
           ]
 
         },
 
 
         {
+
           id: interaction.user.id,
 
           allow:[
+
             PermissionsBitField.Flags.ViewChannel,
+
             PermissionsBitField.Flags.SendMessages
+
           ]
 
         }
+
 
       ]
 
@@ -718,8 +773,11 @@ client.on("interactionCreate", async (interaction) => {
 
 
     await channel.send(
+
       `<@${interaction.user.id}> Ticket created!`
+
     );
+
 
 
     await interaction.reply({
@@ -731,9 +789,11 @@ client.on("interactionCreate", async (interaction) => {
 
     });
 
+
   }
 
 });
+
 
 
 
