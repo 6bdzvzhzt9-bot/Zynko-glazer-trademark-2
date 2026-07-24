@@ -6,7 +6,10 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  AttachmentBuilder
+  AttachmentBuilder,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require("discord.js");
 
 const express = require("express");
@@ -26,98 +29,181 @@ const SETUP_FILE = "./setup.json";
 const CLAIM_FILE = "./claims.json";
 const BACKUP_FILE = "./backups.json";
 
-if (!fs.existsSync(SETUP_FILE)) {
+
+if (!fs.existsSync(SETUP_FILE))
   fs.writeFileSync(SETUP_FILE, "{}");
-}
 
-if (!fs.existsSync(CLAIM_FILE)) {
+if (!fs.existsSync(CLAIM_FILE))
   fs.writeFileSync(CLAIM_FILE, "{}");
-}
-if (!fs.existsSync(BACKUP_FILE)) {
-  fs.writeFileSync(BACKUP_FILE, "{}");
-}
 
-// Discord bot
+if (!fs.existsSync(BACKUP_FILE))
+  fs.writeFileSync(BACKUP_FILE, "{}");
+
+
+// Client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessages
   ]
 });
 
 
-client.once("ready", () => {
+// Slash command list
+const commands = [
+
+  new SlashCommandBuilder()
+    .setName("ticket")
+    .setDescription("Open a support ticket"),
+
+  new SlashCommandBuilder()
+    .setName("setup")
+    .setDescription("Setup transcript and leaderboard channel"),
+
+  new SlashCommandBuilder()
+    .setName("claim")
+    .setDescription("Claim a ticket"),
+
+  new SlashCommandBuilder()
+    .setName("backup")
+    .setDescription("Backup server")
+    .addSubcommand(sub =>
+      sub.setName("create")
+      .setDescription("Create a backup"))
+    .addSubcommand(sub =>
+      sub.setName("restore")
+      .setDescription("Restore backup")),
+
+  new SlashCommandBuilder()
+    .setName("info")
+    .setDescription("Show commands")
+
+].map(command => command.toJSON());
+
+
+// Register commands
+client.once("ready", async () => {
+
   console.log(`Logged in as ${client.user.tag}`);
+
+  const rest = new REST({
+    version: "10"
+  }).setToken(process.env.TOKEN);
+
+
+  await rest.put(
+    Routes.applicationCommands(client.user.id),
+    {
+      body: commands
+    }
+  );
+
+
+  console.log("Slash commands loaded.");
 });
+// Slash command handler
+client.on("interactionCreate", async (interaction) => {
+
+  if (interaction.isChatInputCommand()) {
+
+    const command = interaction.commandName;
 
 
-// Messages
-client.on("messageCreate", async (message) => {
+    // /ticket
+    if (command === "ticket") {
 
-  if (message.author.bot) return;
-
-
-  // Open ticket command
-  if (message.content === "!ticket") {
-
-    const button = new ButtonBuilder()
-      .setCustomId("open_ticket")
-      .setLabel("🎟️ Open Ticket")
-      .setStyle(ButtonStyle.Primary);
+      const button = new ButtonBuilder()
+        .setCustomId("open_ticket")
+        .setLabel("🎟️ Open Ticket")
+        .setStyle(ButtonStyle.Primary);
 
 
-    const row = new ActionRowBuilder()
-      .addComponents(button);
+      const row = new ActionRowBuilder()
+        .addComponents(button);
 
 
-    message.channel.send({
-      content: "Click below to open a support ticket.",
-      components: [row]
-    });
+      await interaction.reply({
+        content: "Click below to open a support ticket.",
+        components: [row]
+      });
 
-  }
-
-
-  // Setup command
-  if (message.content === "!setup") {
-
-    const setup = {
-      logsChannel: message.channel.id
-    };
+    }
 
 
-    fs.writeFileSync(
-      SETUP_FILE,
-      JSON.stringify(setup, null, 2)
-    );
+
+    // /setup
+    if (command === "setup") {
+
+      const setup = {
+        logsChannel: interaction.channel.id
+      };
 
 
-    message.reply(
-      `✅ Setup complete!\n📄 Transcripts: ${message.channel}\n🏆 Leaderboard: ${message.channel}`
-    );
+      fs.writeFileSync(
+        SETUP_FILE,
+        JSON.stringify(setup, null, 2)
+      );
 
-  }
 
-
-  // Claim command starts here
-  if (message.content === "!claim") {
-      if (!message.channel.name.startsWith("ticket-")) {
-
-      return message.reply(
-        "❌ This command can only be used inside a ticket."
+      await interaction.reply(
+        `✅ Setup complete!\n📄 Transcripts: ${interaction.channel}\n🏆 Leaderboard: ${interaction.channel}`
       );
 
     }
 
 
-    const messages = await message.channel.messages.fetch({
+
+    // /info
+    if (command === "info") {
+
+      await interaction.reply(`
+🤖 **Bot Commands**
+
+🎟️ /ticket
+• Opens a support ticket.
+
+⚙️ /setup
+• Sets the transcript + leaderboard channel.
+
+📋 /claim
+• Claims a ticket and updates leaderboard.
+
+💾 /backup create
+• Saves a server backup.
+
+♻️ /backup restore
+• Restores a server backup.
+      `);
+
+    }
+
+  }
+
+});
+// Continue slash command handler
+client.on("interactionCreate", async (interaction) => {
+
+  if (!interaction.isChatInputCommand()) return;
+
+
+  // /claim
+  if (interaction.commandName === "claim") {
+
+    if (!interaction.channel.name.startsWith("ticket-")) {
+      return interaction.reply({
+        content: "❌ This command can only be used inside a ticket.",
+        ephemeral: true
+      });
+    }
+
+
+    const messages = await interaction.channel.messages.fetch({
       limit: 100
     });
 
 
     const transcript = messages
-      .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+      .sort((a,b) => a.createdTimestamp - b.createdTimestamp)
       .map(msg =>
         `[${new Date(msg.createdTimestamp).toLocaleString()}] ${msg.author.username}: ${msg.content}`
       )
@@ -125,7 +211,7 @@ client.on("messageCreate", async (message) => {
 
 
     const fileName =
-      `${message.channel.name}-transcript.txt`;
+      `${interaction.channel.name}-transcript.txt`;
 
 
     fs.writeFileSync(
@@ -140,7 +226,7 @@ client.on("messageCreate", async (message) => {
 
 
     const logsChannel =
-      message.guild.channels.cache.get(setup.logsChannel);
+      interaction.guild.channels.cache.get(setup.logsChannel);
 
 
     if (logsChannel) {
@@ -151,7 +237,7 @@ client.on("messageCreate", async (message) => {
 
       logsChannel.send({
         content:
-        `📄 Transcript\nTicket: **${message.channel.name}**\nClaimed by: ${message.author}`,
+        `📄 Transcript\nTicket: **${interaction.channel.name}**\nClaimed by: ${interaction.user}`,
         files: [file]
       });
 
@@ -160,14 +246,16 @@ client.on("messageCreate", async (message) => {
 
     let payment = 0;
 
-    const ticketName = message.channel.name.toLowerCase();
+    const ticketName =
+      interaction.channel.name.toLowerCase();
+
 
     if (ticketName.includes("dono-")) {
       payment = 0.50;
-    } 
+    }
     else if (ticketName.includes("ingame")) {
       payment = 0.30;
-    } 
+    }
     else if (ticketName.includes("mod-map")) {
       payment = 3.00;
     }
@@ -178,17 +266,19 @@ client.on("messageCreate", async (message) => {
     );
 
 
-    if (!claims[message.author.id]) {
-      claims[message.author.id] = {
-        name: message.author.username,
+    if (!claims[interaction.user.id]) {
+
+      claims[interaction.user.id] = {
+        name: interaction.user.username,
         claims: 0,
         money: 0
       };
+
     }
 
 
-    claims[message.author.id].claims += 1;
-    claims[message.author.id].money += payment;
+    claims[interaction.user.id].claims += 1;
+    claims[interaction.user.id].money += payment;
 
 
     fs.writeFileSync(
@@ -197,123 +287,117 @@ client.on("messageCreate", async (message) => {
     );
 
 
-    const leaderboard = Object.values(claims)
-      .sort((a, b) => b.money - a.money)
-      .slice(0, 10)
-      .map((user, index) =>
-`${index + 1}. ${user.name}
-🎟️ Claims: ${user.claims}
-💰 Earned: $${user.money.toFixed(2)}`
-      )
-      .join("\n\n");
-
-
-    if (logsChannel) {
-      logsChannel.send(
-`🏆 Claim Leaderboard
-
-${leaderboard}`
-      );
-    }
-
-
-    message.reply(
+    await interaction.reply(
       `✅ Ticket claimed!\n💰 Payment added: $${payment.toFixed(2)}`
     );
 
   }
 
-// Backup command
-if (message.content === "!backup create") {
 
-  const backup = {
-    server: message.guild.name,
-    roles: message.guild.roles.cache.map(role => ({
-      name: role.name,
-      permissions: role.permissions.toArray()
-    })),
-    channels: message.guild.channels.cache.map(channel => ({
-      name: channel.name,
-      type: channel.type
-    }))
-  };
 
-  let backups = JSON.parse(
-    fs.readFileSync(BACKUP_FILE)
-  );
+  // /backup create
+  if (
+    interaction.commandName === "backup" &&
+    interaction.options.getSubcommand() === "create"
+  ) {
 
-  backups[message.guild.id] = backup;
+    const backup = {
 
-  fs.writeFileSync(
-    BACKUP_FILE,
-    JSON.stringify(backups, null, 2)
-  );
-console.log(backups);
-  message.reply("✅ Server backup saved!");
-}
-// Restore command
-if (message.content === "!backup restore") {
+      server: interaction.guild.name,
 
-  const backups = JSON.parse(
-    fs.readFileSync(BACKUP_FILE)
-  );
-
-  const backup = backups[message.guild.id];
-
-  if (!backup) {
-    return message.reply("❌ No backup found!");
-  }
-
-  for (const role of backup.roles) {
-    if (role.name !== "@everyone") {
-      await message.guild.roles.create({
+      roles: interaction.guild.roles.cache.map(role => ({
         name: role.name,
-        permissions: role.permissions
-      });
-    }
-  }
+        permissions: role.permissions.toArray()
+      })),
 
-  for (const channel of backup.channels) {
-
-    const exists = message.guild.channels.cache.find(
-      c => c.name === channel.name
-    );
-
-    if (!exists) {
-      await message.guild.channels.create({
+      channels: interaction.guild.channels.cache.map(channel => ({
         name: channel.name,
         type: channel.type
-      });
-    }
+      }))
+
+    };
+
+
+    let backups = JSON.parse(
+      fs.readFileSync(BACKUP_FILE)
+    );
+
+
+    backups[interaction.guild.id] = backup;
+
+
+    fs.writeFileSync(
+      BACKUP_FILE,
+      JSON.stringify(backups, null, 2)
+    );
+
+
+    interaction.reply("✅ Server backup saved!");
+
   }
 
-  message.reply("✅ Server restore complete!");
-}
-  // Info command
-  if (message.content === "!info") {
-    message.reply(`
-🤖 **Bot Commands**
 
-🎟️ !ticket
-• Opens a support ticket.
 
-⚙️ !setup
-• Sets the transcript + leaderboard channel.
+  // /backup restore
+  if (
+    interaction.commandName === "backup" &&
+    interaction.options.getSubcommand() === "restore"
+  ) {
 
-📋 !claim
-• Claims a ticket.
-• Saves transcript.
-• Adds payment.
-• Updates leaderboard.
 
-ℹ️ !info
-• Shows this command list.
-`);
+    const backups = JSON.parse(
+      fs.readFileSync(BACKUP_FILE)
+    );
+
+
+    const backup =
+      backups[interaction.guild.id];
+
+
+    if (!backup) {
+      return interaction.reply("❌ No backup found!");
+    }
+
+
+    for (const role of backup.roles) {
+
+      if (role.name !== "@everyone") {
+
+        await interaction.guild.roles.create({
+          name: role.name,
+          permissions: role.permissions
+        });
+
+      }
+
+    }
+
+
+    for (const channel of backup.channels) {
+
+      const exists =
+        interaction.guild.channels.cache.find(
+          c => c.name === channel.name
+        );
+
+
+      if (!exists) {
+
+        await interaction.guild.channels.create({
+          name: channel.name,
+          type: channel.type
+        });
+
+      }
+
+    }
+
+
+    interaction.reply("✅ Server restore complete!");
+
   }
 
 });
-
-
 // Ticket button system
 client.on("interactionCreate", async (interaction) => {
 
@@ -322,40 +406,50 @@ client.on("interactionCreate", async (interaction) => {
 
   if (interaction.customId === "open_ticket") {
 
+
     const channel = await interaction.guild.channels.create({
 
       name: `ticket-${interaction.user.username}`,
 
       type: ChannelType.GuildText,
 
+
       permissionOverwrites: [
+
         {
           id: interaction.guild.id,
+
           deny: [
             PermissionsBitField.Flags.ViewChannel
           ]
         },
 
+
         {
           id: interaction.user.id,
+
           allow: [
             PermissionsBitField.Flags.ViewChannel,
             PermissionsBitField.Flags.SendMessages
           ]
         }
+
       ]
 
     });
 
 
-    channel.send(
+    await channel.send(
       `<@${interaction.user.id}> Ticket created!`
     );
 
 
-    interaction.reply({
+    await interaction.reply({
+
       content: `Ticket opened: ${channel}`,
+
       ephemeral: true
+
     });
 
   }
@@ -363,4 +457,5 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 
+// Login
 client.login(process.env.TOKEN);
