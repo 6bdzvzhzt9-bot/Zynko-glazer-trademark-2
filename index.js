@@ -393,7 +393,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
 
-    interaction.reply("✅ Server restore complete!");
+interaction.editReply("✅ Server restore complete!");
 
   }
 
