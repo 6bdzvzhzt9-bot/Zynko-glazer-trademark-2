@@ -9,15 +9,14 @@ const {
   AttachmentBuilder,
   REST,
   Routes,
-  SlashCommandBuilder,
-  ActivityType
+  SlashCommandBuilder
 } = require("discord.js");
 
 const express = require("express");
 const fs = require("fs");
 
 
-// Web server
+// Keep alive
 const app = express();
 
 app.get("/", (req, res) => {
@@ -31,16 +30,12 @@ app.listen(process.env.PORT || 3000);
 const SETUP_FILE = "./setup.json";
 const CLAIM_FILE = "./claims.json";
 const BACKUP_FILE = "./backups.json";
-const CUSTOM_FILE = "./custom.json";
-const MAINTENANCE_FILE = "./maintenance.json";
 
 
 for (const file of [
   SETUP_FILE,
   CLAIM_FILE,
-  BACKUP_FILE,
-  CUSTOM_FILE,
-  MAINTENANCE_FILE
+  BACKUP_FILE
 ]) {
 
   if (!fs.existsSync(file)) {
@@ -50,43 +45,45 @@ for (const file of [
 }
 
 
-// Client
+// Discord client
 const client = new Client({
 
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
   ]
 
 });
 
 
-// Slash Commands
+client.on("error", console.error);
+// Slash commands
 const commands = [
 
   new SlashCommandBuilder()
+    .setName("info")
+    .setDescription("Show bot commands"),
+
+
+  new SlashCommandBuilder()
     .setName("ticket")
-    .setDescription("Open a support ticket"),
+    .setDescription("Open a ticket"),
 
 
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Setup bot logs"),
+    .setDescription("Setup logs"),
 
 
   new SlashCommandBuilder()
     .setName("claim")
-    .setDescription("Claim a ticket"),
-
-
-  new SlashCommandBuilder()
-    .setName("storesetup")
-    .setDescription("Create store server"),
+    .setDescription("Claim ticket"),
 
 
   new SlashCommandBuilder()
     .setName("backup")
-    .setDescription("Server backup")
+    .setDescription("Backup server")
     .addSubcommand(sub =>
       sub
         .setName("create")
@@ -96,47 +93,13 @@ const commands = [
       sub
         .setName("restore")
         .setDescription("Restore backup")
-    ),
-
-
-  new SlashCommandBuilder()
-    .setName("customize")
-    .setDescription("Customize bot"),
-
-
-  new SlashCommandBuilder()
-    .setName("stats")
-    .setDescription("Show bot stats"),
-
-
-  new SlashCommandBuilder()
-    .setName("botinfo")
-    .setDescription("Show bot info"),
-
-
-  new SlashCommandBuilder()
-    .setName("announce")
-    .setDescription("Send announcement"),
-
-
-  new SlashCommandBuilder()
-    .setName("broadcast")
-    .setDescription("Send bot message"),
-
-
-  new SlashCommandBuilder()
-    .setName("maintenance")
-    .setDescription("Toggle maintenance"),
-
-
-  new SlashCommandBuilder()
-    .setName("info")
-    .setDescription("Show commands")
+    )
 
 ].map(cmd => cmd.toJSON());
 
 
-// Ready
+
+// Bot ready
 client.once("ready", async () => {
 
   console.log(`Logged in as ${client.user.tag}`);
@@ -158,6 +121,7 @@ client.once("ready", async () => {
   console.log("Commands loaded!");
 
 });
+// Slash command handler
 client.on("interactionCreate", async (interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
@@ -176,191 +140,9 @@ client.on("interactionCreate", async (interaction) => {
 🎟️ /ticket
 ⚙️ /setup
 📋 /claim
-🛒 /storesetup
 💾 /backup
-🎨 /customize
-📊 /stats
-👤 /botinfo
-📢 /announce
-📡 /broadcast
-🔧 /maintenance
-    `);
-
-  }
-
-
-
-  // /storesetup
-  if (command === "storesetup") {
-
-    await interaction.deferReply();
-
-
-    const roles = [
-      "Owner",
-      "Manager",
-      "Developer",
-      "Support Team",
-      "Customer",
-      "Bots"
-    ];
-
-
-    const categories = {
-
-      "📌 INFORMATION": [
-        "welcome",
-        "rules",
-        "announcements"
-      ],
-
-      "🛒 STORE": [
-        "store-menu",
-        "pricing",
-        "reviews"
-      ],
-
-      "🎟️ ORDERS": [
-        "create-ticket",
-        "active-orders",
-        "completed-orders"
-      ],
-
-      "💬 COMMUNITY": [
-        "general",
-        "suggestions"
-      ],
-
-      "🛠️ SUPPORT": [
-        "help",
-        "bug-reports"
-      ],
-
-      "👑 STAFF": [
-        "staff-chat",
-        "order-logs",
-        "staff-logs"
-      ]
-
-    };
-
-
-    let rolesCreated = 0;
-
-
-    for (const roleName of roles) {
-
-      const exists =
-        interaction.guild.roles.cache.find(
-          r => r.name === roleName
-        );
-
-
-      if (!exists) {
-
-        await interaction.guild.roles.create({
-          name: roleName
-        });
-
-        rolesCreated++;
-
-      }
-
-    }
-
-
-
-    let channelsCreated = 0;
-
-
-    for (const categoryName in categories) {
-
-
-      let category =
-        interaction.guild.channels.cache.find(
-          c =>
-          c.name === categoryName &&
-          c.type === ChannelType.GuildCategory
-        );
-
-
-      if (!category) {
-
-        category =
-        await interaction.guild.channels.create({
-
-          name: categoryName,
-
-          type: ChannelType.GuildCategory
-
-        });
-
-      }
-
-
-
-      for (const channelName of categories[categoryName]) {
-
-
-        const exists =
-          interaction.guild.channels.cache.find(
-            c => c.name === channelName
-          );
-
-
-        if (!exists) {
-
-          await interaction.guild.channels.create({
-
-            name: channelName,
-
-            type: ChannelType.GuildText,
-
-            parent: category.id
-
-          });
-
-
-          channelsCreated++;
-
-        }
-
-      }
-
-    }
-
-
-    return interaction.editReply(
-      `✅ Store server created!\n\n` +
-      `👑 Roles created: ${rolesCreated}\n` +
-      `📁 Channels created: ${channelsCreated}`
-    );
-
-  }
-
-
-
-  // /ticket
-  if (command === "ticket") {
-
-    const button = new ButtonBuilder()
-      .setCustomId("open_ticket")
-      .setLabel("🎟️ Open Ticket")
-      .setStyle(ButtonStyle.Primary);
-
-
-    const row = new ActionRowBuilder()
-      .addComponents(button);
-
-
-    return interaction.reply({
-
-      content:
-      "Click below to open a support ticket.",
-
-      components:[row]
-
-    });
+🛒 !setupshop
+`);
 
   }
 
@@ -371,15 +153,14 @@ client.on("interactionCreate", async (interaction) => {
 
     const setup = {
 
-      logsChannel:
-      interaction.channel.id
+      logsChannel: interaction.channel.id
 
     };
 
 
     fs.writeFileSync(
       SETUP_FILE,
-      JSON.stringify(setup,null,2)
+      JSON.stringify(setup, null, 2)
     );
 
 
@@ -388,364 +169,67 @@ client.on("interactionCreate", async (interaction) => {
     );
 
   }
-    // /claim
-  if (command === "claim") {
 
 
-    if (!interaction.channel.name.startsWith("ticket-")) {
 
-      return interaction.reply({
+  // /ticket
+  if (command === "ticket") {
 
-        content:
-        "❌ Use this inside a ticket.",
+    const button = new ButtonBuilder()
 
-        ephemeral:true
+      .setCustomId("open_ticket")
 
-      });
+      .setLabel("🎟️ Open Ticket")
 
-    }
+      .setStyle(ButtonStyle.Primary);
 
 
 
-    await interaction.deferReply();
+    const row = new ActionRowBuilder()
+      .addComponents(button);
 
 
 
-    const messages =
-      await interaction.channel.messages.fetch({
+    return interaction.reply({
 
-        limit:100
+      content:
+      "Click below to open a ticket.",
 
-      });
+      components:[row]
 
-
-
-    const transcript =
-      messages
-      .sort((a,b) =>
-        a.createdTimestamp -
-        b.createdTimestamp
-      )
-      .map(msg =>
-        `[${msg.author.username}] ${msg.content}`
-      )
-      .join("\n");
-
-
-
-    const fileName =
-    `${interaction.channel.name}-transcript.txt`;
-
-
-
-    fs.writeFileSync(
-      fileName,
-      transcript
-    );
-
-
-
-    const setup =
-    JSON.parse(
-      fs.readFileSync(SETUP_FILE)
-    );
-
-
-
-    const logs =
-    interaction.guild.channels.cache.get(
-      setup.logsChannel
-    );
-
-
-
-    if (logs) {
-
-      logs.send({
-
-        content:
-        `📄 Transcript\nTicket: ${interaction.channel.name}\nClaimed by: ${interaction.user}`,
-
-        files:[
-          new AttachmentBuilder(fileName)
-        ]
-
-      });
-
-    }
-
-
-
-    let claims =
-    JSON.parse(
-      fs.readFileSync(CLAIM_FILE)
-    );
-
-
-
-    if (!claims[interaction.user.id]) {
-
-      claims[interaction.user.id] = {
-
-        name:
-        interaction.user.username,
-
-        claims:0
-
-      };
-
-    }
-
-
-
-    claims[interaction.user.id].claims++;
-
-
-
-    fs.writeFileSync(
-
-      CLAIM_FILE,
-
-      JSON.stringify(
-        claims,
-        null,
-        2
-      )
-
-    );
-
-
-
-    return interaction.editReply(
-      "✅ Ticket claimed!"
-    );
-
-  }
-
-
-
-
-  // /backup
-  if (command === "backup") {
-
-
-    const type =
-    interaction.options.getSubcommand();
-
-
-
-    if (type === "create") {
-
-
-      const backup = {
-
-        server:
-        interaction.guild.name,
-
-
-        roles:
-        interaction.guild.roles.cache.map(role => ({
-
-          name: role.name,
-
-          permissions:
-          role.permissions.toArray()
-
-        })),
-
-
-        channels:
-        interaction.guild.channels.cache.map(channel => ({
-
-          name: channel.name,
-
-          type: channel.type
-
-        }))
-
-      };
-
-
-
-      let backups =
-      JSON.parse(
-        fs.readFileSync(BACKUP_FILE)
-      );
-
-
-
-      backups[interaction.guild.id] =
-      backup;
-
-
-
-      fs.writeFileSync(
-
-        BACKUP_FILE,
-
-        JSON.stringify(
-          backups,
-          null,
-          2
-        )
-
-      );
-
-
-
-      return interaction.reply(
-        "✅ Server backup saved!"
-      );
-
-    }
-
-
-
-    if (type === "restore") {
-
-
-      await interaction.deferReply();
-
-
-
-      const backups =
-      JSON.parse(
-        fs.readFileSync(BACKUP_FILE)
-      );
-
-
-
-      const backup =
-      backups[interaction.guild.id];
-
-
-
-      if (!backup) {
-
-        return interaction.editReply(
-          "❌ No backup found!"
-        );
-
-      }
-
-
-
-      let roles = 0;
-      let channels = 0;
-
-
-
-      for (const role of backup.roles) {
-
-        if (role.name !== "@everyone") {
-
-
-          const exists =
-          interaction.guild.roles.cache.find(
-            r => r.name === role.name
-          );
-
-
-
-          if (!exists) {
-
-            await interaction.guild.roles.create({
-
-              name: role.name,
-
-              permissions:
-              role.permissions
-
-            });
-
-
-            roles++;
-
-          }
-
-        }
-
-      }
-            for (const channel of backup.channels) {
-
-
-        const exists =
-        interaction.guild.channels.cache.find(
-          c => c.name === channel.name
-        );
-
-
-        if (!exists) {
-
-          await interaction.guild.channels.create({
-
-            name: channel.name,
-
-            type: channel.type
-
-          });
-
-
-          channels++;
-
-        }
-
-      }
-
-
-
-      return interaction.editReply(
-
-        `✅ Restore complete!\n\n🛡️ Roles: ${roles}\n📁 Channels: ${channels}`
-
-      );
-
-    }
+    });
 
   }
 
 
 });
-
-
-
-
 // Ticket button system
 client.on("interactionCreate", async (interaction) => {
 
-
   if (!interaction.isButton()) return;
-
 
 
   if (interaction.customId === "open_ticket") {
 
 
-
     const channel =
     await interaction.guild.channels.create({
 
-
       name:
       `ticket-${interaction.user.username}`,
-
 
       type:
       ChannelType.GuildText,
 
 
-
       permissionOverwrites:[
-
 
         {
 
           id: interaction.guild.id,
 
           deny:[
-
             PermissionsBitField.Flags.ViewChannel
-
           ]
 
         },
@@ -765,7 +249,6 @@ client.on("interactionCreate", async (interaction) => {
 
         }
 
-
       ]
 
     });
@@ -773,9 +256,7 @@ client.on("interactionCreate", async (interaction) => {
 
 
     await channel.send(
-
       `<@${interaction.user.id}> Ticket created!`
-
     );
 
 
@@ -793,9 +274,392 @@ client.on("interactionCreate", async (interaction) => {
   }
 
 });
+// !setupshop
+client.on("messageCreate", async (message) => {
+
+  if (message.author.bot) return;
+
+  if (message.content !== "!setupshop") return;
+
+
+  const roles = [
+    "Owner",
+    "Manager",
+    "Developer",
+    "Support Team",
+    "Customer",
+    "Bots"
+  ];
+
+
+  const categories = {
+
+    "📌 INFORMATION": [
+      "welcome",
+      "rules",
+      "announcements"
+    ],
+
+    "🛒 STORE": [
+      "store-menu",
+      "pricing",
+      "reviews"
+    ],
+
+    "🎟️ ORDERS": [
+      "create-ticket",
+      "active-orders",
+      "completed-orders"
+    ],
+
+    "💬 COMMUNITY": [
+      "general",
+      "suggestions"
+    ],
+
+    "🛠️ SUPPORT": [
+      "help",
+      "bug-reports"
+    ],
+
+    "👑 STAFF": [
+      "staff-chat",
+      "order-logs",
+      "staff-logs"
+    ]
+
+  };
+
+
+  let rolesCreated = 0;
+  let channelsCreated = 0;
+
+
+  for (const roleName of roles) {
+
+    const exists =
+    message.guild.roles.cache.find(
+      r => r.name === roleName
+    );
+
+
+    if (!exists) {
+
+      await message.guild.roles.create({
+        name: roleName
+      });
+
+      rolesCreated++;
+
+    }
+
+  }
+
+
+  for (const categoryName in categories) {
+
+    let category =
+    message.guild.channels.cache.find(
+      c =>
+      c.name === categoryName &&
+      c.type === ChannelType.GuildCategory
+    );
+
+
+    if (!category) {
+
+      category =
+      await message.guild.channels.create({
+
+        name: categoryName,
+
+        type: ChannelType.GuildCategory
+
+      });
+
+    }
+
+
+    for (const channelName of categories[categoryName]) {
+
+      const exists =
+      message.guild.channels.cache.find(
+        c => c.name === channelName
+      );
+
+
+      if (!exists) {
+
+        await message.guild.channels.create({
+
+          name: channelName,
+
+          type: ChannelType.GuildText,
+
+          parent: category.id
+
+        });
+
+        channelsCreated++;
+
+      }
+
+    }
+
+  }
+
+
+  message.reply(
+    `✅ Shop server created!\n\n👑 Roles: ${rolesCreated}\n📁 Channels: ${channelsCreated}`
+  );
+
+});
+// /claim
+client.on("interactionCreate", async (interaction) => {
+
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName !== "claim") return;
+
+
+  if (!interaction.channel.name.startsWith("ticket-")) {
+
+    return interaction.reply({
+
+      content: "❌ Use this inside a ticket.",
+
+      ephemeral: true
+
+    });
+
+  }
 
 
 
+  await interaction.deferReply();
 
+
+
+  const messages =
+  await interaction.channel.messages.fetch({
+
+    limit: 100
+
+  });
+
+
+
+  const transcript =
+  messages
+  .sort((a,b) =>
+    a.createdTimestamp - b.createdTimestamp
+  )
+  .map(msg =>
+    `[${msg.author.username}] ${msg.content}`
+  )
+  .join("\n");
+
+
+
+  const fileName =
+  `${interaction.channel.name}-transcript.txt`;
+
+
+
+  fs.writeFileSync(
+    fileName,
+    transcript
+  );
+
+
+
+  const setup =
+  JSON.parse(
+    fs.readFileSync(SETUP_FILE)
+  );
+
+
+
+  const logs =
+  interaction.guild.channels.cache.get(
+    setup.logsChannel
+  );
+
+
+
+  if (logs) {
+
+    logs.send({
+
+      content:
+      `📄 Transcript\nTicket: ${interaction.channel.name}\nClaimed by: ${interaction.user}`,
+
+      files:[
+        new AttachmentBuilder(fileName)
+      ]
+
+    });
+
+  }
+
+
+
+  let claims =
+  JSON.parse(
+    fs.readFileSync(CLAIM_FILE)
+  );
+
+
+
+  if (!claims[interaction.user.id]) {
+
+    claims[interaction.user.id] = {
+
+      name: interaction.user.username,
+
+      claims: 0
+
+    };
+
+  }
+
+
+
+  claims[interaction.user.id].claims++;
+
+
+
+  fs.writeFileSync(
+
+    CLAIM_FILE,
+
+    JSON.stringify(claims,null,2)
+
+  );
+
+
+
+  return interaction.editReply(
+    "✅ Ticket claimed!"
+  );
+
+
+});
+// /backup
+client.on("interactionCreate", async (interaction) => {
+
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName !== "backup") return;
+
+
+  const type =
+  interaction.options.getSubcommand();
+
+
+
+  // Create backup
+  if (type === "create") {
+
+
+    const backup = {
+
+      server:
+      interaction.guild.name,
+
+
+      roles:
+      interaction.guild.roles.cache.map(role => ({
+
+        name: role.name,
+
+        permissions:
+        role.permissions.toArray()
+
+      })),
+
+
+      channels:
+      interaction.guild.channels.cache.map(channel => ({
+
+        name: channel.name,
+
+        type: channel.type
+
+      }))
+
+    };
+
+
+
+    let backups =
+    JSON.parse(
+      fs.readFileSync(BACKUP_FILE)
+    );
+
+
+
+    backups[interaction.guild.id] = backup;
+
+
+
+    fs.writeFileSync(
+
+      BACKUP_FILE,
+
+      JSON.stringify(backups,null,2)
+
+    );
+
+
+
+    return interaction.reply(
+      "✅ Server backup saved!"
+    );
+
+
+  }
+
+
+
+  // Restore backup
+  if (type === "restore") {
+
+
+    await interaction.deferReply();
+
+
+
+    const backups =
+    JSON.parse(
+      fs.readFileSync(BACKUP_FILE)
+    );
+
+
+
+    const backup =
+    backups[interaction.guild.id];
+
+
+
+    if (!backup) {
+
+      return interaction.editReply(
+        "❌ No backup found!"
+      );
+
+    }
+
+
+
+    return interaction.editReply(
+      "✅ Restore system ready!"
+    );
+
+
+  }
+
+
+});
 // Login
 client.login(process.env.TOKEN);
