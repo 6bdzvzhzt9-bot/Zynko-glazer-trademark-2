@@ -146,9 +146,8 @@ const commands = [
 
 
   new SlashCommandBuilder()
-  .setName("setup")
-  .setDescription("Setup bot channels"),
-
+.setName("setup")
+.setDescription("Setup bot channels"),
 
   new SlashCommandBuilder()
   .setName("backup")
@@ -1354,7 +1353,81 @@ ephemeral:true
 
 });
 
+// =====================
+// UNCLAIM SYSTEM
+// =====================
 
+client.on(
+"interactionCreate",
+async interaction => {
+
+if(!interaction.isChatInputCommand())
+return;
+
+if(interaction.commandName !== "unclaim")
+return;
+
+
+if(!interaction.member.permissions.has(
+PermissionsBitField.Flags.Administrator
+)){
+
+return interaction.reply({
+content:"❌ Administrator permission required.",
+ephemeral:true
+});
+
+}
+
+
+let tickets = load(FILES.tickets);
+
+
+let ticket =
+tickets[interaction.channel.id];
+
+
+if(!ticket?.claimed){
+
+return interaction.reply({
+content:"❌ This ticket is not claimed.",
+ephemeral:true
+});
+
+}
+
+
+delete ticket.claimer;
+delete ticket.claimerName;
+delete ticket.claimedAt;
+
+ticket.claimed = false;
+
+
+tickets[interaction.channel.id] = ticket;
+
+
+save(
+FILES.tickets,
+tickets
+);
+
+
+logActivity(
+interaction.user,
+`Unclaimed ${interaction.channel.name}`
+);
+
+
+await interaction.reply({
+
+content:
+"✅ Ticket claim removed."
+
+});
+
+
+});
 // =====================
 // FINAL LOGIN
 // =====================
