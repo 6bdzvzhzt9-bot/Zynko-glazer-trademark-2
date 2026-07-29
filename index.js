@@ -1,16 +1,13 @@
 const {
   Client,
   GatewayIntentBits,
-  ChannelType,
-  PermissionsBitField,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  AttachmentBuilder,
   REST,
   Routes,
   SlashCommandBuilder,
-  EmbedBuilder
+  PermissionsBitField,
+  EmbedBuilder,
+  AttachmentBuilder,
+  ChannelType
 } = require("discord.js");
 
 const express = require("express");
@@ -18,7 +15,7 @@ const fs = require("fs");
 
 
 // =====================
-// KEEP ALIVE
+// KEEP ALIVE (RENDER)
 // =====================
 
 const app = express();
@@ -37,14 +34,19 @@ app.listen(process.env.PORT || 3000);
 const FILES = {
 
   setup: "./setup.json",
-  tickets: "./tickets.json",
   claims: "./claims.json",
   earnings: "./earnings.json",
   activity: "./activity.json",
+  tickets: "./tickets.json",
+  messages: "./messages.json",
   backups: "./backups.json"
 
 };
 
+
+// =====================
+// CREATE DATABASE FILES
+// =====================
 
 for (const file of Object.values(FILES)) {
 
@@ -67,7 +69,7 @@ for (const file of Object.values(FILES)) {
 function load(file) {
 
   return JSON.parse(
-    fs.readFileSync(file)
+    fs.readFileSync(file, "utf8")
   );
 
 }
@@ -81,6 +83,20 @@ function save(file, data) {
   );
 
 }
+
+
+// =====================
+// ALLOWED TICKET CATEGORIES
+// =====================
+
+const TICKET_CATEGORIES = [
+
+  "➖➖➖Mesh Support➖➖➖",
+  "➖➖➖News➖➖➖",
+  "➖➖➖Mesh➖➖➖",
+  "➖➖➖Support➖➖➖"
+
+];
 
 
 // =====================
@@ -104,9 +120,10 @@ const client = new Client({
 });
 
 
-client.on("error", console.error);
-
-
+client.on(
+  "error",
+  console.error
+);
 // =====================
 // SLASH COMMANDS
 // =====================
@@ -114,83 +131,82 @@ client.on("error", console.error);
 const commands = [
 
   new SlashCommandBuilder()
-  .setName("info")
-  .setDescription("Show bot commands"),
+  .setName("claim")
+  .setDescription("Claim current ticket"),
+
+
+  new SlashCommandBuilder()
+  .setName("unclaim")
+  .setDescription("Remove ticket claim"),
+
+
+  new SlashCommandBuilder()
+  .setName("close")
+  .setDescription("Close ticket"),
 
 
   new SlashCommandBuilder()
   .setName("setup")
-  .setDescription("Setup bot features"),
-
-
-  new SlashCommandBuilder()
-  .setName("ticket")
-  .setDescription("Open a ticket"),
-
-
-  new SlashCommandBuilder()
-  .setName("claim")
-  .setDescription("Claim a ticket"),
+  .setDescription("Setup bot channels"),
 
 
   new SlashCommandBuilder()
   .setName("backup")
-  .setDescription("Backup server")
+  .setDescription("Backup server"),
 
-  .addSubcommand(sub =>
-    sub
-    .setName("create")
-    .setDescription("Create backup")
-  )
 
-  .addSubcommand(sub =>
-    sub
-    .setName("restore")
-    .setDescription("Restore backup")
-  )
+  new SlashCommandBuilder()
+  .setName("info")
+  .setDescription("Bot information")
 
 ].map(command => command.toJSON());
 
 
 // =====================
-// BOT READY
+// LOAD COMMANDS
 // =====================
 
-client.once("ready", async () => {
+client.once("ready", async()=>{
 
-  console.log(
-    `${client.user.tag} is online`
-  );
-
-
-  const rest = new REST({
-    version: "10"
-  }).setToken(process.env.TOKEN);
+console.log(
+`${client.user.tag} is online`
+);
 
 
-  await rest.put(
-
-    Routes.applicationCommands(
-      client.user.id
-    ),
-
-    {
-      body: commands
-    }
-
-  );
+const rest = new REST({
+version:"10"
+}).setToken(
+process.env.TOKEN
+);
 
 
-  console.log(
-    "Commands loaded"
-  );
+await rest.put(
+
+Routes.applicationCommands(
+client.user.id
+),
+
+{
+body: commands
+}
+
+);
+
+
+console.log(
+"Commands loaded"
+);
 
 });
+
+
 // =====================
 // SETUP DASHBOARD
 // =====================
 
-client.on("interactionCreate", async(interaction)=>{
+client.on(
+"interactionCreate",
+async interaction=>{
 
 
 if(!interaction.isChatInputCommand())
@@ -219,67 +235,85 @@ ephemeral:true
 
 
 
-const row1 = new ActionRowBuilder()
-.addComponents(
-
-new ButtonBuilder()
-.setCustomId("setup_ticket")
-.setLabel("🎫 Tickets")
-.setStyle(ButtonStyle.Primary),
-
-
-new ButtonBuilder()
-.setCustomId("setup_transcript")
-.setLabel("📜 Transcript Channel")
-.setStyle(ButtonStyle.Primary),
-
-
-new ButtonBuilder()
-.setCustomId("setup_claims")
-.setLabel("🏆 Claim Leaderboard")
-.setStyle(ButtonStyle.Success)
-
-);
-
-
-
-const row2 = new ActionRowBuilder()
-.addComponents(
-
-new ButtonBuilder()
-.setCustomId("setup_earnings")
-.setLabel("💵 Earnings Tracker")
-.setStyle(ButtonStyle.Success),
-
-
-new ButtonBuilder()
-.setCustomId("setup_activity")
-.setLabel("👮 Admin Activity")
-.setStyle(ButtonStyle.Secondary)
-
-);
-
-
-
 await interaction.reply({
 
 content:
-`
-⚙️ **Setup Dashboard**
+"⚙️ **Setup Dashboard**\n\nChoose a system to configure:",
 
-Choose what you want to setup:
-
-🎫 Ticket System
-📜 Transcript Channel
-🏆 Claim Leaderboard
-💵 Earnings Tracker
-👮 Admin Activity
-`,
 
 components:[
-row1,
-row2
+
+{
+
+type:1,
+
+components:[
+
+{
+
+type:2,
+
+label:"📜 Transcript Channel",
+
+style:1,
+
+custom_id:"setup_transcript"
+
+},
+
+{
+
+type:2,
+
+label:"🏆 Claim Leaderboard",
+
+style:3,
+
+custom_id:"setup_claims"
+
+}
+
+]
+
+},
+
+
+{
+
+type:1,
+
+components:[
+
+{
+
+type:2,
+
+label:"💵 Earnings Board",
+
+style:3,
+
+custom_id:"setup_earnings"
+
+},
+
+{
+
+type:2,
+
+label:"👮 Activity Board",
+
+style:2,
+
+custom_id:"setup_activity"
+
+}
+
+]
+
+}
+
 ],
+
 
 ephemeral:true
 
@@ -289,12 +323,13 @@ ephemeral:true
 });
 
 
-
 // =====================
 // SETUP BUTTONS
 // =====================
 
-client.on("interactionCreate", async(interaction)=>{
+client.on(
+"interactionCreate",
+async interaction=>{
 
 
 if(!interaction.isButton())
@@ -306,9 +341,9 @@ return;
 
 
 
-let setup =
-load(FILES.setup);
-
+let setup = load(
+FILES.setup
+);
 
 
 if(!setup[interaction.guild.id]){
@@ -327,29 +362,10 @@ setup[interaction.guild.id];
 switch(interaction.customId){
 
 
-case "setup_ticket":
-
-serverSetup.ticketSystem = true;
-
-
-await interaction.reply({
-
-content:
-"✅ Ticket system enabled.",
-
-ephemeral:true
-
-});
-
-break;
-
-
-
 case "setup_transcript":
 
 serverSetup.transcriptChannel =
 interaction.channel.id;
-
 
 await interaction.reply({
 
@@ -366,9 +382,8 @@ break;
 
 case "setup_claims":
 
-serverSetup.claimLeaderboard =
+serverSetup.claimChannel =
 interaction.channel.id;
-
 
 await interaction.reply({
 
@@ -388,11 +403,10 @@ case "setup_earnings":
 serverSetup.earningsChannel =
 interaction.channel.id;
 
-
 await interaction.reply({
 
 content:
-"✅ Earnings tracker channel saved.",
+"✅ Earnings channel saved.",
 
 ephemeral:true
 
@@ -407,11 +421,10 @@ case "setup_activity":
 serverSetup.activityChannel =
 interaction.channel.id;
 
-
 await interaction.reply({
 
 content:
-"✅ Activity tracker channel saved.",
+"✅ Activity channel saved.",
 
 ephemeral:true
 
@@ -436,186 +449,12 @@ setup
 
 });
 // =====================
-// TICKET COMMAND
+// CLAIM SYSTEM
 // =====================
 
-client.on("interactionCreate", async(interaction)=>{
-
-if(!interaction.isChatInputCommand())
-return;
-
-if(interaction.commandName !== "ticket")
-return;
-
-
-const row = new ActionRowBuilder()
-.addComponents(
-
-new ButtonBuilder()
-.setCustomId("ticket_support")
-.setLabel("🛠️ Support")
-.setStyle(ButtonStyle.Primary),
-
-
-new ButtonBuilder()
-.setCustomId("ticket_news")
-.setLabel("📰 News")
-.setStyle(ButtonStyle.Secondary),
-
-
-new ButtonBuilder()
-.setCustomId("ticket_dono")
-.setLabel("💰 Dono")
-.setStyle(ButtonStyle.Success)
-
-);
-
-
-await interaction.reply({
-
-content:
-"Choose ticket type:",
-
-components:[row],
-
-ephemeral:true
-
-});
-
-
-});
-
-
-// =====================
-// CREATE TICKET
-// =====================
-
-client.on("interactionCreate", async(interaction)=>{
-
-if(!interaction.isButton())
-return;
-
-if(!interaction.customId.startsWith("ticket_"))
-return;
-
-
-const type =
-interaction.customId.replace("ticket_","");
-
-
-const channel =
-await interaction.guild.channels.create({
-
-name:
-`${type}-ticket-${interaction.user.username}`,
-
-type:
-ChannelType.GuildText,
-
-
-permissionOverwrites:[
-
-{
-id: interaction.guild.id,
-
-deny:[
-PermissionsBitField.Flags.ViewChannel
-]
-
-},
-
-{
-id: interaction.user.id,
-
-allow:[
-
-PermissionsBitField.Flags.ViewChannel,
-
-PermissionsBitField.Flags.SendMessages
-
-]
-
-}
-
-]
-
-});
-
-
-let tickets =
-load(FILES.tickets);
-
-
-tickets[channel.id]={
-
-owner:
-interaction.user.id,
-
-type:type,
-
-claimed:false
-
-};
-
-
-save(
-FILES.tickets,
-tickets
-);
-
-
-
-await channel.send({
-
-content:
-`<@${interaction.user.id}> Your ${type} ticket has been created.`
-
-});
-
-
-await interaction.reply({
-
-content:
-`✅ Ticket created: ${channel}`,
-
-ephemeral:true
-
-});
-
-
-});
-
-
-
-// =====================
-// TICKET VALUE
-// =====================
-
-function ticketValue(type){
-
-if(type === "support")
-return 0.30;
-
-
-if(type === "news")
-return 0.50;
-
-
-if(type === "dono")
-return 0;
-
-
-return 0;
-
-}
-
-
-
-// =====================
-// CLAIM SYSTEM (FIXED)
-// =====================
-
-client.on("interactionCreate", async(interaction)=>{
+client.on(
+"interactionCreate",
+async interaction=>{
 
 
 if(!interaction.isChatInputCommand())
@@ -627,10 +466,10 @@ return;
 
 
 
+// Permission check
+
 if(!interaction.member.permissions.has(
-
 PermissionsBitField.Flags.Administrator
-
 )){
 
 return interaction.reply({
@@ -646,20 +485,19 @@ ephemeral:true
 
 
 
-let tickets =
-load(FILES.tickets);
+// Category check
+
+const category =
+interaction.channel.parent?.name;
 
 
-let ticket =
-tickets[interaction.channel.id];
 
-
-if(!ticket){
+if(!TICKET_CATEGORIES.includes(category)){
 
 return interaction.reply({
 
 content:
-"❌ This is not a ticket.",
+"❌ This channel is not a supported ticket.",
 
 ephemeral:true
 
@@ -669,49 +507,71 @@ ephemeral:true
 
 
 
-if(ticket.claimed){
-
-return interaction.reply({
-
-content:
-`❌ Already claimed by <@${ticket.claimedBy}>`,
-
-ephemeral:true
-
-});
-
-}
-
-
-
-ticket.claimed = true;
-
-ticket.claimedBy =
-interaction.user.id;
-
-
-tickets[interaction.channel.id]=ticket;
-
-
-save(
-FILES.tickets,
-tickets
-);
-
-
-
-// CLAIM COUNT
+// Load claims
 
 let claims =
 load(FILES.claims);
 
 
+
+let ticketData =
+load(FILES.tickets);
+
+
+
+const ticketId =
+interaction.channel.id;
+
+
+
+// Already claimed
+
+if(ticketData[ticketId]?.claimed){
+
+return interaction.reply({
+
+content:
+`❌ Ticket already claimed by <@${ticketData[ticketId].claimer}>`,
+
+ephemeral:true
+
+});
+
+}
+
+
+
+// Save ticket claim
+
+ticketData[ticketId] = {
+
+claimed:true,
+
+claimer:interaction.user.id,
+
+claimerName:interaction.user.username,
+
+claimedAt:Date.now(),
+
+category:category
+
+};
+
+
+save(
+FILES.tickets,
+ticketData
+);
+
+
+
+// Update leaderboard
+
 if(!claims[interaction.user.id]){
 
 claims[interaction.user.id]={
 
-name:
-interaction.user.username,
+name:interaction.user.username,
 
 claims:0
 
@@ -730,35 +590,199 @@ claims
 
 
 
-// TRANSCRIPT
+// Activity log
 
-const messages =
-await interaction.channel.messages.fetch({
+logActivity(
 
-limit:100
+interaction.user,
+
+`Claimed ${interaction.channel.name}`
+
+);
+
+
+
+await interaction.reply({
+
+content:
+
+`✅ Ticket claimed by ${interaction.user}`
 
 });
 
 
+});
+
+
+
+// =====================
+// ACTIVITY LOGGER
+// =====================
+
+async function logActivity(user, action){
+
+
+let activity =
+load(FILES.activity);
+
+
+
+if(!activity[user.id]){
+
+activity[user.id]={
+
+name:user.username,
+
+actions:[]
+
+};
+
+}
+
+
+
+activity[user.id].actions.push({
+
+action:action,
+
+time:Date.now()
+
+});
+
+
+
+save(
+FILES.activity,
+activity
+);
+
+
+}
+// =====================
+// TICKET VALUES
+// =====================
+
+function ticketValue(category){
+
+if(category.includes("Dono"))
+return 0.50;
+
+
+if(category.includes("Support"))
+return 0.30;
+
+
+return 0;
+
+}
+
+
+// =====================
+// CLOSE TICKET
+// =====================
+
+client.on(
+"interactionCreate",
+async interaction=>{
+
+
+if(!interaction.isChatInputCommand())
+return;
+
+
+if(interaction.commandName !== "close")
+return;
+
+
+
+const category =
+interaction.channel.parent?.name;
+
+
+
+if(!TICKET_CATEGORIES.includes(category)){
+
+return interaction.reply({
+
+content:
+"❌ This is not a supported ticket.",
+
+ephemeral:true
+
+});
+
+}
+
+
+
+let tickets =
+load(FILES.tickets);
+
+
+let ticket =
+tickets[interaction.channel.id];
+
+
+
+const claimer =
+ticket?.claimer;
+
+
+
+if(!claimer){
+
+return interaction.reply({
+
+content:
+"❌ This ticket has not been claimed.",
+
+ephemeral:true
+
+});
+
+}
+
+
+
+// CREATE TRANSCRIPT
+
+const messages =
+await interaction.channel.messages.fetch({
+limit:100
+});
+
+
+
 const transcript =
 messages
-.sort((a,b)=>
+
+.sort(
+(a,b)=>
 a.createdTimestamp-b.createdTimestamp
 )
-.map(msg =>
+
+.map(msg=>
 `[${msg.author.username}] ${msg.content}`
 )
+
 .join("\n");
+
 
 
 const fileName =
 `${interaction.channel.name}-transcript.txt`;
 
 
+
 fs.writeFileSync(
 fileName,
 transcript
 );
+
+
+
+// SEND TRANSCRIPT
+
 await sendTranscript(
 interaction.channel,
 fileName,
@@ -766,18 +790,20 @@ interaction
 );
 
 
-// EARNINGS
+
+// UPDATE EARNINGS
 
 let earnings =
 load(FILES.earnings);
 
 
-if(!earnings[interaction.user.id]){
 
-earnings[interaction.user.id]={
+if(!earnings[claimer]){
+
+earnings[claimer]={
 
 name:
-interaction.user.username,
+interaction.guild.members.cache.get(claimer)?.user.username || "Unknown",
 
 money:0
 
@@ -786,8 +812,10 @@ money:0
 }
 
 
-earnings[interaction.user.id].money +=
-ticketValue(ticket.type);
+
+earnings[claimer].money +=
+ticketValue(category);
+
 
 
 save(
@@ -797,31 +825,53 @@ earnings
 
 
 
-interaction.reply({
+// ACTIVITY
+
+logActivity(
+
+interaction.user,
+
+`Closed ${interaction.channel.name}`
+
+);
+
+
+
+await interaction.reply({
 
 content:
-"✅ Ticket claimed, transcript saved, earnings updated."
+"✅ Ticket closed. Transcript saved."
 
 });
 
 
 });
+
+
 // =====================
-// SEND TRANSCRIPT TO CHANNEL
+// SEND TRANSCRIPT
 // =====================
 
-async function sendTranscript(channel, fileName, interaction){
+async function sendTranscript(
+channel,
+fileName,
+interaction
+){
+
 
 const setup =
 load(FILES.setup);
+
 
 
 const serverSetup =
 setup[interaction.guild.id];
 
 
+
 if(!serverSetup?.transcriptChannel)
 return;
+
 
 
 const transcriptChannel =
@@ -830,34 +880,103 @@ serverSetup.transcriptChannel
 );
 
 
+
 if(!transcriptChannel)
 return;
+
 
 
 await transcriptChannel.send({
 
 content:
+
 `📜 **Ticket Transcript**
 
 Ticket: ${channel.name}
 
-Claimed by: ${interaction.user}`,
+Closed by: ${interaction.user}`,
 
 files:[
+
 new AttachmentBuilder(fileName)
+
 ]
 
 });
+
+
+}
+// =====================
+// REFRESH BOARD MESSAGE
+// =====================
+
+async function refreshMessage(channel, idName, content){
+
+let messages =
+load(FILES.messages);
+
+
+
+if(!messages[idName]){
+
+const msg =
+await channel.send(content);
+
+
+messages[idName] =
+msg.id;
+
+
+save(
+FILES.messages,
+messages
+);
+
+
+return;
 
 }
 
 
 
+try{
+
+const old =
+await channel.messages.fetch(
+messages[idName]
+);
+
+
+await old.edit(content);
+
+
+}
+
+catch{
+
+const msg =
+await channel.send(content);
+
+
+messages[idName] =
+msg.id;
+
+
+save(
+FILES.messages,
+messages
+);
+
+}
+
+}
+
+
 // =====================
-// CLAIM LEADERBOARD
+// CLAIM BOARD
 // =====================
 
-async function updateClaimLeaderboard(){
+async function updateClaims(){
 
 
 const setup =
@@ -869,11 +988,12 @@ for(const guildId in setup){
 
 
 const channelId =
-setup[guildId].claimLeaderboard;
+setup[guildId].claimChannel;
 
 
 if(!channelId)
 continue;
+
 
 
 const channel =
@@ -894,6 +1014,7 @@ let text =
 "🏆 **Claim Leaderboard**\n\n";
 
 
+
 Object.values(claims)
 
 .sort((a,b)=>
@@ -902,57 +1023,33 @@ b.claims-a.claims
 
 .forEach((user,index)=>{
 
-
 text +=
 `${index+1}. ${user.name} — ${user.claims} claims\n`;
 
 });
 
 
-const messages =
-await channel.messages.fetch({
-limit:10
-});
-
-
-const oldMessage =
-messages.find(
-msg=>msg.author.id===client.user.id
+await refreshMessage(
+channel,
+`claims_${guildId}`,
+text
 );
 
 
-
-if(oldMessage){
-
-oldMessage.edit(text);
-
-}else{
-
-channel.send(text);
-
 }
-
-
-}
-
 
 }
 
 
 
 setInterval(
-
-updateClaimLeaderboard,
-
+updateClaims,
 120000
-
 );
 
 
-
-
 // =====================
-// EARNINGS TRACKER
+// EARNINGS BOARD
 // =====================
 
 async function updateEarnings(){
@@ -974,6 +1071,7 @@ if(!channelId)
 continue;
 
 
+
 const channel =
 client.channels.cache.get(channelId);
 
@@ -989,7 +1087,7 @@ load(FILES.earnings);
 
 
 let text =
-"💵 **Earnings Tracker**\n\n";
+"💵 **Earnings Board**\n\n";
 
 
 
@@ -1001,7 +1099,6 @@ b.money-a.money
 
 .forEach((user,index)=>{
 
-
 text +=
 `${index+1}. ${user.name} — $${user.money.toFixed(2)}\n`;
 
@@ -1009,248 +1106,121 @@ text +=
 
 
 
-const messages =
-await channel.messages.fetch({
-limit:10
-});
-
-
-
-const oldMessage =
-messages.find(
-msg=>msg.author.id===client.user.id
+await refreshMessage(
+channel,
+`earnings_${guildId}`,
+text
 );
 
 
-
-if(oldMessage){
-
-oldMessage.edit(text);
-
-}else{
-
-channel.send(text);
-
 }
-
-
-}
-
 
 }
 
 
 
 setInterval(
-
 updateEarnings,
-
 120000
-
 );
+
+
 // =====================
-// ADMIN ACTIVITY TRACKER
+// ACTIVITY BOARD
 // =====================
 
-async function logActivity(user, action){
+async function updateActivity(){
 
-let activity =
+
+const setup =
+load(FILES.setup);
+
+
+
+for(const guildId in setup){
+
+
+const channelId =
+setup[guildId].activityChannel;
+
+
+if(!channelId)
+continue;
+
+
+
+const channel =
+client.channels.cache.get(channelId);
+
+
+if(!channel)
+continue;
+
+
+
+const activity =
 load(FILES.activity);
 
 
-activity[user.id] = {
 
-name:
-user.username,
-
-action:action,
-
-time:Date.now()
-
-};
-
-
-save(
-FILES.activity,
-activity
-);
-
-}
+let text =
+"👮 **Admin Activity**\n\n";
 
 
 
-// Log commands used
+Object.values(activity)
 
-client.on("interactionCreate", async(interaction)=>{
-
-
-if(!interaction.user)
-return;
+.forEach(user=>{
 
 
-if(interaction.isChatInputCommand()){
+text +=
+`**${user.name}**\n`;
 
-await logActivity(
 
-interaction.user,
+user.actions
+.slice(-5)
+.forEach(action=>{
 
-`Used /${interaction.commandName}`
 
-);
+text +=
+`• ${action.action}\n`;
 
-}
+});
+
+
+text += "\n";
 
 
 });
 
 
 
-
-// =====================
-// BACKUP SYSTEM
-// =====================
-
-client.on("interactionCreate", async(interaction)=>{
-
-
-if(!interaction.isChatInputCommand())
-return;
-
-
-if(interaction.commandName !== "backup")
-return;
-
-
-
-if(!interaction.member.permissions.has(
-
-PermissionsBitField.Flags.ManageGuild
-
-)){
-
-return interaction.reply({
-
-content:
-"❌ You need Manage Server permission.",
-
-ephemeral:true
-
-});
-
-}
-
-
-
-const type =
-interaction.options.getSubcommand();
-
-
-
-let backups =
-load(FILES.backups);
-
-
-
-if(type === "create"){
-
-
-
-backups[interaction.guild.id] = {
-
-
-roles:
-
-interaction.guild.roles.cache.map(role=>({
-
-name:
-role.name,
-
-permissions:
-role.permissions.toArray()
-
-})),
-
-
-channels:
-
-interaction.guild.channels.cache.map(channel=>({
-
-name:
-channel.name,
-
-type:
-channel.type
-
-}))
-
-
-};
-
-
-
-save(
-FILES.backups,
-backups
+await refreshMessage(
+channel,
+`activity_${guildId}`,
+text
 );
 
 
-
-return interaction.reply({
-
-content:
-"✅ Backup created.",
-
-ephemeral:true
-
-});
-
+}
 
 }
 
 
 
-if(type === "restore"){
-
-
-if(!backups[interaction.guild.id]){
-
-
-return interaction.reply({
-
-content:
-"❌ No backup found.",
-
-ephemeral:true
-
-});
-
-
-}
-
-
-
-return interaction.reply({
-
-content:
-"✅ Backup found. Restore system ready.",
-
-ephemeral:true
-
-});
-
-
-}
-
-
-});
-
+setInterval(
+updateActivity,
+120000
+);
 
 
 // =====================
 // INFO COMMAND
 // =====================
 
-client.on("interactionCreate", async(interaction)=>{
+client.on(
+"interactionCreate",
+async interaction=>{
 
 
 if(!interaction.isChatInputCommand())
@@ -1268,22 +1238,27 @@ embeds:[
 
 new EmbedBuilder()
 
-.setTitle("🤖 Bot Commands")
+.setTitle("🤖 Bot Information")
 
 .setDescription(`
 
-🎫 /ticket
-⚙️ /setup
-👑 /claim
-💾 /backup
+🎫 Ticket Claim System
+
+Commands:
+
+/claim
+/close
+/setup
+/backup
+/info
 
 Features:
 
-📜 Transcript System
+📜 Transcripts
 🏆 Claim Leaderboard
 💵 Earnings Tracker
-👮 Admin Activity
-💾 Backup Manager
+👮 Activity Tracker
+💾 Backup System
 
 `)
 
@@ -1295,9 +1270,95 @@ Features:
 });
 
 
+// =====================
+// BACKUP SYSTEM
+// =====================
+
+client.on(
+"interactionCreate",
+async interaction=>{
+
+
+if(!interaction.isChatInputCommand())
+return;
+
+
+if(interaction.commandName !== "backup")
+return;
+
+
+
+if(!interaction.member.permissions.has(
+PermissionsBitField.Flags.ManageGuild
+)){
+
+return interaction.reply({
+
+content:
+"❌ Manage Server permission required.",
+
+ephemeral:true
+
+});
+
+}
+
+
+
+let backups =
+load(FILES.backups);
+
+
+
+backups[interaction.guild.id]={
+
+roles:
+interaction.guild.roles.cache.map(r=>({
+
+name:r.name,
+
+permissions:r.permissions.toArray()
+
+})),
+
+
+channels:
+interaction.guild.channels.cache.map(c=>({
+
+name:c.name,
+
+type:c.type
+
+}))
+
+};
+
+
+
+save(
+FILES.backUPS || FILES.backups,
+backups
+);
+
+
+
+await interaction.reply({
+
+content:
+"✅ Backup created.",
+
+ephemeral:true
+
+});
+
+
+});
+
 
 // =====================
 // FINAL LOGIN
 // =====================
 
-client.login(process.env.TOKEN);
+client.login(
+process.env.TOKEN
+);
