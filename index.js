@@ -1312,13 +1312,9 @@ deny:BigInt(overwrite.deny)
 }
 
 
-  await interaction.followUp({
-
-    content:
-    "✅ Server clone restored."
-
-  });
-
+  await interaction.editReply({
+  content: "✅ Server clone restored."
+});
 
 });
 client.login(process.env.TOKEN);
