@@ -1,6 +1,7 @@
 // ============================================================
 // ZYNKO CONTROL BOT
-// Single-command dashboard bot
+// FULL SINGLE-FILE SERVER CONTROL + TEMPLATE SYSTEM
+// discord.js v14+
 // ============================================================
 
 const {
@@ -15,14 +16,38 @@ const {
   ButtonStyle,
   RoleSelectMenuBuilder,
   ChannelSelectMenuBuilder,
-  ChannelType: DiscordChannelType,
+  StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
-  TextInputStyle
+  TextInputStyle,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require("discord.js");
 
 const express = require("express");
 const fs = require("fs");
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID =
+  process.env.CLIENT_ID ||
+  process.env.DISCORD_CLIENT_ID;
+
+if (!TOKEN) {
+  console.error("❌ TOKEN environment variable is missing.");
+  process.exit(1);
+}
+
+if (!CLIENT_ID) {
+  console.error(
+    "❌ CLIENT_ID or DISCORD_CLIENT_ID environment variable is missing."
+  );
+  process.exit(1);
+}
 
 // ============================================================
 // KEEP ALIVE
@@ -31,10 +56,12 @@ const fs = require("fs");
 const app = express();
 
 app.get("/", (req, res) => {
-  res.send("Bot is online!");
+  res.send("Zynko Control Bot is online!");
 });
 
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🌐 Keep-alive server started.");
+});
 
 // ============================================================
 // DATABASE
@@ -60,6 +87,10 @@ const DEFAULT_GUILD = {
     autoRoles: false
   },
 
+  autoRole: {
+    roleId: null
+  },
+
   moderation: {
     warnings: true,
     automod: false,
@@ -72,8 +103,6 @@ const DEFAULT_GUILD = {
     botName: null
   },
 
-  templates: [],
-
   embeds: [],
 
   warnings: {},
@@ -83,20 +112,32 @@ const DEFAULT_GUILD = {
   setupComplete: false
 };
 
+function emptyDB() {
+  return {
+    guilds: {},
+    templates: {}
+  };
+}
+
 if (!fs.existsSync(DB_FILE)) {
   fs.writeFileSync(
     DB_FILE,
-    JSON.stringify({ guilds: {} }, null, 2)
+    JSON.stringify(emptyDB(), null, 2)
   );
 }
 
 function loadDB() {
   try {
-    return JSON.parse(
+    const db = JSON.parse(
       fs.readFileSync(DB_FILE, "utf8")
     );
+
+    if (!db.guilds) db.guilds = {};
+    if (!db.templates) db.templates = {};
+
+    return db;
   } catch {
-    return { guilds: {} };
+    return emptyDB();
   }
 }
 
@@ -107,10 +148,12 @@ function saveDB(db) {
   );
 }
 
+function clone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
 function cloneDefault() {
-  return JSON.parse(
-    JSON.stringify(DEFAULT_GUILD)
-  );
+  return clone(DEFAULT_GUILD);
 }
 
 function getGuildData(guildId) {
@@ -126,9 +169,7 @@ function getGuildData(guildId) {
 
 function updateGuild(guildId, data) {
   const db = loadDB();
-
   db.guilds[guildId] = data;
-
   saveDB(db);
 }
 
@@ -146,55 +187,35 @@ const client = new Client({
 });
 
 // ============================================================
-// ACCESS SYSTEM
+// PERMISSION SYSTEM
 // ============================================================
 
 function dashboardAccess(member, guild) {
+  if (!member || !guild) return false;
 
-  if (!member || !guild) {
-    return false;
-  }
-
-  // Actual server owner
   if (guild.ownerId === member.id) {
     return true;
   }
 
-  const permissions = member.permissions;
-
-  // Manage Server
   if (
-    permissions.has(
+    member.permissions.has(
       PermissionsBitField.Flags.ManageGuild
     )
   ) {
     return true;
   }
 
-  // Manager-style access:
-  // Must be able to manage BOTH channels and roles.
-  const canManageChannels =
-    permissions.has(
+  return (
+    member.permissions.has(
       PermissionsBitField.Flags.ManageChannels
-    );
-
-  const canManageRoles =
-    permissions.has(
+    ) &&
+    member.permissions.has(
       PermissionsBitField.Flags.ManageRoles
-    );
-
-  if (
-    canManageChannels &&
-    canManageRoles
-  ) {
-    return true;
-  }
-
-  return false;
+    )
+  );
 }
 
 function requireDashboard(interaction) {
-
   if (
     !interaction.guild ||
     !dashboardAccess(
@@ -204,9 +225,9 @@ function requireDashboard(interaction) {
   ) {
     interaction.reply({
       content:
-        "❌ You don't have Manager/Owner permissions for the dashboard.",
+        "❌ You don't have permission to use the dashboard.",
       ephemeral: true
-    });
+    }).catch(() => {});
 
     return false;
   }
@@ -215,7 +236,616 @@ function requireDashboard(interaction) {
 }
 
 // ============================================================
-// COMMON UI
+// COMMAND REGISTRATION
+// ============================================================
+
+async function registerCommands() {
+  const commands = [
+
+    new SlashCommandBuilder()
+      .setName("dashboard")
+      .setDescription(
+        "Open the Zynko Control Dashboard."
+      ),
+
+    new SlashCommandBuilder()
+      .setName("save")
+      .setDescription(
+        "Save this server as a universal template."
+      )
+      .addStringOption(option =>
+        option
+          .setName("name")
+          .setDescription(
+            "Name for the template."
+          )
+          .setRequired(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("load")
+      .setDescription(
+        "Load a universal server template."
+      )
+      .addStringOption(option =>
+        option
+          .setName("name")
+          .setDescription(
+            "Template name."
+          )
+          .setRequired(true)
+      )
+
+  ].map(command => command.toJSON());
+
+  const rest = new REST({
+    version: "10"
+  }).setToken(TOKEN);
+
+  await rest.put(
+    Routes.applicationCommands(CLIENT_ID),
+    {
+      body: commands
+    }
+  );
+
+  console.log("✅ Slash commands registered.");
+}
+
+// ============================================================
+// TEMPLATE SYSTEM
+// ============================================================
+
+function buildServerTemplate(guild) {
+
+  const roles = guild.roles.cache
+    .filter(role =>
+      role.id !== guild.id &&
+      !role.managed
+    )
+    .sort(
+      (a, b) =>
+        a.position - b.position
+    )
+    .map(role => ({
+      name: role.name,
+      color: role.hexColor,
+      hoist: role.hoist,
+      mentionable: role.mentionable,
+      permissions:
+        role.permissions.bitfield.toString()
+    }));
+
+  const channels = guild.channels.cache
+    .filter(channel =>
+      !channel.isThread()
+    )
+    .sort(
+      (a, b) =>
+        a.rawPosition - b.rawPosition
+    )
+    .map(channel => {
+
+      let type = "text";
+
+      if (
+        channel.type ===
+        ChannelType.GuildVoice
+      ) {
+        type = "voice";
+      }
+
+      if (
+        channel.type ===
+        ChannelType.GuildCategory
+      ) {
+        type = "category";
+      }
+
+      if (
+        channel.type ===
+        ChannelType.GuildAnnouncement
+      ) {
+        type = "announcement";
+      }
+
+      if (
+        channel.type ===
+        ChannelType.GuildStageVoice
+      ) {
+        type = "stage";
+      }
+
+      return {
+        name: channel.name,
+        type,
+        parent:
+          channel.parent?.name || null,
+        position:
+          channel.rawPosition,
+        topic:
+          channel.topic || null,
+        nsfw:
+          Boolean(channel.nsfw),
+        rateLimitPerUser:
+          channel.rateLimitPerUser || 0,
+        bitrate:
+          channel.bitrate || null,
+        userLimit:
+          channel.userLimit || 0
+      };
+    });
+
+  const data =
+    getGuildData(guild.id);
+
+  return {
+    version: 1,
+
+    name: guild.name,
+
+    roles,
+
+    channels,
+
+    automation:
+      clone(data.automation),
+
+    autoRole:
+      clone(data.autoRole),
+
+    moderation:
+      clone(data.moderation),
+
+    settings:
+      clone(data.settings),
+
+    embeds:
+      clone(data.embeds),
+
+    created:
+      Date.now()
+  };
+}
+
+async function saveTemplate(guild, name) {
+
+  const db = loadDB();
+
+  const key =
+    name.trim().toLowerCase();
+
+  db.templates[key] =
+    buildServerTemplate(guild);
+
+  db.templates[key].displayName =
+    name.trim();
+
+  saveDB(db);
+
+  return db.templates[key];
+}
+
+function getTemplate(name) {
+
+  const db = loadDB();
+
+  return (
+    db.templates[
+      name.trim().toLowerCase()
+    ] || null
+  );
+}
+
+// ============================================================
+// LOAD TEMPLATE
+// ============================================================
+
+async function loadTemplate(
+  guild,
+  template
+) {
+
+  const botMember =
+    guild.members.me;
+
+  if (!botMember) {
+    throw new Error(
+      "Bot member could not be found."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // CREATE ROLES
+  // ----------------------------------------------------------
+
+  const roleMap =
+    new Map();
+
+  const existingRoles =
+    guild.roles.cache;
+
+  for (
+    const savedRole of template.roles
+  ) {
+
+    let role =
+      existingRoles.find(
+        r =>
+          !r.managed &&
+          r.name === savedRole.name
+      );
+
+    if (!role) {
+
+      try {
+
+        role =
+          await guild.roles.create({
+            name:
+              savedRole.name,
+
+            colors:
+              savedRole.color === "#000000"
+                ? undefined
+                : savedRole.color,
+
+            hoist:
+              savedRole.hoist,
+
+            mentionable:
+              savedRole.mentionable,
+
+            permissions:
+              BigInt(
+                savedRole.permissions
+              ),
+
+            reason:
+              "Zynko template load"
+          });
+
+      } catch (error) {
+
+        console.log(
+          `Role creation failed for ${savedRole.name}:`,
+          error.message
+        );
+
+        continue;
+      }
+
+    }
+
+    roleMap.set(
+      savedRole.name,
+      role
+    );
+  }
+
+  // ----------------------------------------------------------
+  // CREATE CATEGORIES FIRST
+  // ----------------------------------------------------------
+
+  const categoryMap =
+    new Map();
+
+  const categories =
+    template.channels
+      .filter(
+        channel =>
+          channel.type === "category"
+      )
+      .sort(
+        (a, b) =>
+          a.position - b.position
+      );
+
+  for (
+    const savedChannel of categories
+  ) {
+
+    let category =
+      guild.channels.cache.find(
+        channel =>
+          channel.type ===
+            ChannelType.GuildCategory &&
+          channel.name ===
+            savedChannel.name
+      );
+
+    if (!category) {
+
+      try {
+
+        category =
+          await guild.channels.create({
+            name:
+              savedChannel.name,
+
+            type:
+              ChannelType.GuildCategory,
+
+            reason:
+              "Zynko template load"
+          });
+
+      } catch (error) {
+
+        console.log(
+          `Category creation failed for ${savedChannel.name}:`,
+          error.message
+        );
+
+        continue;
+      }
+    }
+
+    categoryMap.set(
+      savedChannel.name,
+      category
+    );
+  }
+
+  // ----------------------------------------------------------
+  // CREATE CHANNELS
+  // ----------------------------------------------------------
+
+  const normalChannels =
+    template.channels
+      .filter(
+        channel =>
+          channel.type !== "category"
+      )
+      .sort(
+        (a, b) =>
+          a.position - b.position
+      );
+
+  for (
+    const savedChannel of normalChannels
+  ) {
+
+    let type =
+      ChannelType.GuildText;
+
+    if (
+      savedChannel.type ===
+      "voice"
+    ) {
+      type =
+        ChannelType.GuildVoice;
+    }
+
+    if (
+      savedChannel.type ===
+      "announcement"
+    ) {
+      type =
+        ChannelType.GuildAnnouncement;
+    }
+
+    if (
+      savedChannel.type ===
+      "stage"
+    ) {
+      type =
+        ChannelType.GuildStageVoice;
+    }
+
+    let channel =
+      guild.channels.cache.find(
+        existing =>
+          existing.name ===
+            savedChannel.name &&
+          existing.type === type
+      );
+
+    const parent =
+      savedChannel.parent
+        ? categoryMap.get(
+            savedChannel.parent
+          )
+        : null;
+
+    if (!channel) {
+
+      try {
+
+        const options = {
+          name:
+            savedChannel.name,
+
+          type,
+
+          parent:
+            parent?.id || undefined,
+
+          reason:
+            "Zynko template load"
+        };
+
+        if (
+          type ===
+            ChannelType.GuildText ||
+          type ===
+            ChannelType.GuildAnnouncement
+        ) {
+
+          if (
+            savedChannel.topic
+          ) {
+            options.topic =
+              savedChannel.topic;
+          }
+
+          options.nsfw =
+            Boolean(
+              savedChannel.nsfw
+            );
+
+          options.rateLimitPerUser =
+            savedChannel.rateLimitPerUser || 0;
+        }
+
+        if (
+          type ===
+          ChannelType.GuildVoice
+        ) {
+
+          if (
+            savedChannel.bitrate
+          ) {
+            options.bitrate =
+              savedChannel.bitrate;
+          }
+
+          if (
+            savedChannel.userLimit
+          ) {
+            options.userLimit =
+              savedChannel.userLimit;
+          }
+        }
+
+        channel =
+          await guild.channels.create(
+            options
+          );
+
+      } catch (error) {
+
+        console.log(
+          `Channel creation failed for ${savedChannel.name}:`,
+          error.message
+        );
+
+        continue;
+      }
+
+    } else if (parent) {
+
+      try {
+        await channel.setParent(
+          parent.id,
+          {
+            lockPermissions: false,
+            reason:
+              "Zynko template load"
+          }
+        );
+      } catch {}
+
+    }
+  }
+
+  // ----------------------------------------------------------
+  // APPLY ROLE POSITIONS
+  // ----------------------------------------------------------
+
+  for (
+    const savedRole of template.roles
+  ) {
+
+    const role =
+      roleMap.get(
+        savedRole.name
+      );
+
+    if (!role) continue;
+
+    if (
+      role.position >=
+      botMember.roles.highest.position
+    ) {
+      continue;
+    }
+
+    try {
+
+      await role.setPosition(
+        Math.min(
+          savedRole.position || 1,
+          botMember.roles.highest.position - 1
+        ),
+        "Zynko template load"
+      );
+
+    } catch {}
+  }
+
+  // ----------------------------------------------------------
+  // RESTORE BOT SETTINGS
+  // ----------------------------------------------------------
+
+  const data =
+    getGuildData(guild.id);
+
+  data.automation =
+    clone(template.automation);
+
+  data.autoRole =
+    clone(template.autoRole);
+
+  data.moderation =
+    clone(template.moderation);
+
+  data.settings =
+    clone(template.settings);
+
+  data.embeds =
+    clone(template.embeds);
+
+  // Try to match saved channels.
+  const currentChannels =
+    guild.channels.cache;
+
+  function findChannelByName(name) {
+    if (!name) return null;
+
+    return currentChannels.find(
+      channel =>
+        channel.name === name
+    );
+  }
+
+  const savedChannelData =
+    template.channels;
+
+  const logChannel =
+    savedChannelData.find(
+      c =>
+        c.name ===
+        guild.channels.cache.get(
+          data.channels.logs
+        )?.name
+    );
+
+  if (logChannel) {
+
+    const actual =
+      findChannelByName(
+        logChannel.name
+      );
+
+    if (actual) {
+      data.channels.logs =
+        actual.id;
+      data.channels.transcripts =
+        actual.id;
+    }
+  }
+
+  updateGuild(
+    guild.id,
+    data
+  );
+
+  return true;
+}
+
+// ============================================================
+// DASHBOARD UI
 // ============================================================
 
 function homeButtons() {
@@ -225,85 +855,132 @@ function homeButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("home_automation")
+        .setCustomId(
+          "home_automation"
+        )
         .setLabel("Automation")
         .setEmoji("⚡")
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(
+          ButtonStyle.Primary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("home_moderation")
+        .setCustomId(
+          "home_moderation"
+        )
         .setLabel("Moderation")
         .setEmoji("🛡️")
-        .setStyle(ButtonStyle.Danger),
+        .setStyle(
+          ButtonStyle.Danger
+        ),
 
       new ButtonBuilder()
-        .setCustomId("home_lookup")
+        .setCustomId(
+          "home_lookup"
+        )
         .setLabel("Lookup")
         .setEmoji("🔎")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("home_embeds")
+        .setCustomId(
+          "home_embeds"
+        )
         .setLabel("Embeds")
         .setEmoji("🧱")
-        .setStyle(ButtonStyle.Success)
+        .setStyle(
+          ButtonStyle.Success
+        )
 
     ),
 
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("home_templates")
+        .setCustomId(
+          "home_templates"
+        )
         .setLabel("Templates")
         .setEmoji("📋")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("home_settings")
+        .setCustomId(
+          "home_settings"
+        )
         .setLabel("Settings")
         .setEmoji("⚙️")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("home_help")
+        .setCustomId(
+          "home_help"
+        )
         .setLabel("Help")
         .setEmoji("🥺")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     )
-
   ];
 }
 
 function backButton() {
 
-  return new ActionRowBuilder().addComponents(
+  return new ActionRowBuilder()
+    .addComponents(
 
-    new ButtonBuilder()
-      .setCustomId("go_home")
-      .setLabel("Back")
-      .setEmoji("↩️")
-      .setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder()
+        .setCustomId("go_home")
+        .setLabel("Back")
+        .setEmoji("↩️")
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
-  );
+    );
 }
 
 // ============================================================
-// HOME EMBED
+// HOME
 // ============================================================
 
-function homeEmbed(guild, user) {
+function homeEmbed(
+  guild,
+  user
+) {
 
-  const data = getGuildData(guild.id);
+  const data =
+    getGuildData(
+      guild.id
+    );
+
+  const moderationActive =
+    data.moderation.automod ||
+    data.moderation.antiSpam ||
+    data.moderation.antiLinks ||
+    data.moderation.antiMassMention;
+
+  const db =
+    loadDB();
 
   return new EmbedBuilder()
 
-    .setTitle("⚙️ Control Dashboard")
+    .setTitle(
+      "⚙️ Zynko Control Dashboard"
+    )
 
     .setDescription(
       "Your server control center.\n\n" +
-      "Everything is managed from this dashboard.\n" +
-      "This session automatically expires after **5 minutes**."
+      "Use the buttons below to configure automation, moderation, templates, embeds and server settings.\n\n" +
+      "Dashboard sessions expire after **5 minutes**."
     )
 
     .addFields(
@@ -311,18 +988,20 @@ function homeEmbed(guild, user) {
       {
         name: "⚡ Automation",
         value:
-          data.automation.transcripts
+          data.automation.transcripts ||
+          data.automation.autoChatLogs ||
+          data.automation.autoRoles ||
+          data.automation.autoJoins ||
+          data.automation.autoGoodbyes
             ? "🟢 Active"
-            : "🔴 Disabled",
+            : "⚪ Disabled",
         inline: true
       },
 
       {
         name: "🛡️ Moderation",
         value:
-          data.moderation.automod ||
-          data.moderation.antiSpam ||
-          data.moderation.antiLinks
+          moderationActive
             ? "🟢 Active"
             : "⚪ Basic",
         inline: true
@@ -331,7 +1010,7 @@ function homeEmbed(guild, user) {
       {
         name: "📋 Templates",
         value:
-          `${data.templates.length} saved`,
+          `${Object.keys(db.templates).length} saved`,
         inline: true
       }
 
@@ -351,14 +1030,19 @@ function homeEmbed(guild, user) {
 
 function automationEmbed(guild) {
 
-  const data = getGuildData(guild.id);
+  const data =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
 
-    .setTitle("⚡ Automation")
+    .setTitle(
+      "⚡ Automation"
+    )
 
     .setDescription(
-      "Automatic systems for your server."
+      "Configure automatic server systems."
     )
 
     .addFields(
@@ -412,7 +1096,9 @@ function automationEmbed(guild) {
         name: "👤 Auto Roles",
         value:
           data.automation.autoRoles
-            ? "🟢 Enabled"
+            ? data.autoRole.roleId
+              ? `🟢 <@&${data.autoRole.roleId}>`
+              : "🟡 Enabled — no role"
             : "🔴 Disabled",
         inline: true
       }
@@ -427,59 +1113,86 @@ function automationButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("auto_transcripts")
+        .setCustomId(
+          "auto_transcripts"
+        )
         .setLabel("Transcripts")
         .setEmoji("📜")
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(
+          ButtonStyle.Primary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("auto_joins")
+        .setCustomId(
+          "auto_joins"
+        )
         .setLabel("Joins")
         .setEmoji("👋")
-        .setStyle(ButtonStyle.Success),
+        .setStyle(
+          ButtonStyle.Success
+        ),
 
       new ButtonBuilder()
-        .setCustomId("auto_goodbyes")
+        .setCustomId(
+          "auto_goodbyes"
+        )
         .setLabel("Goodbyes")
         .setEmoji("🚪")
-        .setStyle(ButtonStyle.Success)
+        .setStyle(
+          ButtonStyle.Success
+        )
 
     ),
 
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("auto_chatlogs")
+        .setCustomId(
+          "auto_chatlogs"
+        )
         .setLabel("Chat Logs")
         .setEmoji("💬")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("auto_delete")
+        .setCustomId(
+          "auto_delete"
+        )
         .setLabel("Delete Logs")
         .setEmoji("🧹")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("auto_roles")
+        .setCustomId(
+          "auto_roles"
+        )
         .setLabel("Auto Roles")
         .setEmoji("👤")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     ),
 
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("automation_channels")
+        .setCustomId(
+          "automation_channels"
+        )
         .setLabel("Channel Setup")
         .setEmoji("📁")
-        .setStyle(ButtonStyle.Primary)
+        .setStyle(
+          ButtonStyle.Primary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
@@ -489,20 +1202,25 @@ function automationButtons() {
 
 function moderationEmbed(guild) {
 
-  const data = getGuildData(guild.id);
+  const data =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
 
-    .setTitle("🛡️ Moderation")
+    .setTitle(
+      "🛡️ Moderation"
+    )
 
     .setDescription(
-      "Server protection and moderation systems."
+      "Server protection and moderation."
     )
 
     .addFields(
 
       {
-        name: "⚠️ System Warnings",
+        name: "⚠️ Warnings",
         value:
           data.moderation.warnings
             ? "🟢 Enabled"
@@ -556,49 +1274,72 @@ function moderationButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("mod_warnings")
+        .setCustomId(
+          "mod_warnings"
+        )
         .setLabel("Warnings")
         .setEmoji("⚠️")
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(
+          ButtonStyle.Primary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("mod_automod")
+        .setCustomId(
+          "mod_automod"
+        )
         .setLabel("AutoMod")
         .setEmoji("🤖")
-        .setStyle(ButtonStyle.Danger),
+        .setStyle(
+          ButtonStyle.Danger
+        ),
 
       new ButtonBuilder()
-        .setCustomId("mod_spam")
+        .setCustomId(
+          "mod_spam"
+        )
         .setLabel("Anti Spam")
         .setEmoji("💬")
-        .setStyle(ButtonStyle.Danger)
+        .setStyle(
+          ButtonStyle.Danger
+        )
 
     ),
 
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("mod_links")
+        .setCustomId(
+          "mod_links"
+        )
         .setLabel("Anti Links")
         .setEmoji("🔗")
-        .setStyle(ButtonStyle.Danger),
+        .setStyle(
+          ButtonStyle.Danger
+        ),
 
       new ButtonBuilder()
-        .setCustomId("mod_mentions")
+        .setCustomId(
+          "mod_mentions"
+        )
         .setLabel("Anti Mentions")
         .setEmoji("📢")
-        .setStyle(ButtonStyle.Danger),
+        .setStyle(
+          ButtonStyle.Danger
+        ),
 
       new ButtonBuilder()
-        .setCustomId("mod_status")
+        .setCustomId(
+          "mod_status"
+        )
         .setLabel("Status")
         .setEmoji("📊")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
@@ -608,14 +1349,15 @@ function moderationButtons() {
 
 function settingsEmbed(guild) {
 
-  const data = getGuildData(guild.id);
+  const data =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
 
-    .setTitle("⚙️ Settings")
-
-    .setDescription(
-      "Configure the bot for this server."
+    .setTitle(
+      "⚙️ Settings"
     )
 
     .addFields(
@@ -629,19 +1371,28 @@ function settingsEmbed(guild) {
       },
 
       {
-        name: "📜 Transcript Channel",
+        name: "📜 Logs",
         value:
-          data.channels.transcripts
-            ? `<#${data.channels.transcripts}>`
+          data.channels.logs
+            ? `<#${data.channels.logs}>`
             : "Not configured",
         inline: true
       },
 
       {
-        name: "📋 Log Channel",
+        name: "👋 Welcome",
         value:
-          data.channels.logs
-            ? `<#${data.channels.logs}>`
+          data.channels.welcome
+            ? `<#${data.channels.welcome}>`
+            : "Not configured",
+        inline: true
+      },
+
+      {
+        name: "🚪 Goodbye",
+        value:
+          data.channels.goodbye
+            ? `<#${data.channels.goodbye}>`
             : "Not configured",
         inline: true
       }
@@ -656,21 +1407,28 @@ function settingsButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("setting_botname")
+        .setCustomId(
+          "setting_botname"
+        )
         .setLabel("Bot Name")
         .setEmoji("🤖")
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(
+          ButtonStyle.Primary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("setting_channels")
+        .setCustomId(
+          "setting_channels"
+        )
         .setLabel("Channels")
         .setEmoji("📁")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
@@ -682,22 +1440,21 @@ function lookupEmbed() {
 
   return new EmbedBuilder()
 
-    .setTitle("🔎 Admin Lookup")
+    .setTitle(
+      "🔎 Admin Lookup"
+    )
 
     .setDescription(
-      "Search information the bot can access.\n\n" +
-
       "**User Search**\n" +
-      "Find a member and display their server information.\n\n" +
+      "Search a member by Discord ID.\n\n" +
 
       "**Message Search**\n" +
-      "Search messages currently accessible to the bot.\n\n" +
+      "Search messages stored by the bot.\n\n" +
 
       "**Related Search**\n" +
-      "Find messages with similar words or phrases.\n\n" +
+      "Search messages containing any supplied word.\n\n" +
 
-      "**Deleted Messages**\n" +
-      "Only messages that were logged before deletion can be shown."
+      "The bot can only search messages it has actually stored."
     );
 }
 
@@ -708,48 +1465,56 @@ function lookupButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("lookup_user")
+        .setCustomId(
+          "lookup_user"
+        )
         .setLabel("User Search")
         .setEmoji("👤")
-        .setStyle(ButtonStyle.Primary),
+        .setStyle(
+          ButtonStyle.Primary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("lookup_messages")
+        .setCustomId(
+          "lookup_messages"
+        )
         .setLabel("Message Search")
         .setEmoji("💬")
-        .setStyle(ButtonStyle.Secondary),
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("lookup_related")
+        .setCustomId(
+          "lookup_related"
+        )
         .setLabel("Related")
         .setEmoji("🔗")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
 // ============================================================
-// EMBED BUILDER
+// EMBEDS
 // ============================================================
 
 function embedsEmbed() {
 
   return new EmbedBuilder()
 
-    .setTitle("🧱 Embed Builder")
+    .setTitle(
+      "🧱 Embed Builder"
+    )
 
     .setDescription(
-      "Create reusable embeds for your server.\n\n" +
-      "Examples:\n" +
-      "• PvP announcements\n" +
-      "• Events\n" +
-      "• Rules\n" +
-      "• Server notices\n" +
-      "• Ticket information"
+      "Create reusable server embeds.\n\n" +
+      "Saved embeds remain available in the dashboard."
     );
 }
 
@@ -760,21 +1525,28 @@ function embedsButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("embed_create")
+        .setCustomId(
+          "embed_create"
+        )
         .setLabel("Create Embed")
         .setEmoji("➕")
-        .setStyle(ButtonStyle.Success),
+        .setStyle(
+          ButtonStyle.Success
+        ),
 
       new ButtonBuilder()
-        .setCustomId("embed_saved")
+        .setCustomId(
+          "embed_saved"
+        )
         .setLabel("Saved Embeds")
         .setEmoji("📋")
-        .setStyle(ButtonStyle.Secondary)
+        .setStyle(
+          ButtonStyle.Secondary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
@@ -782,37 +1554,47 @@ function embedsButtons() {
 // TEMPLATES
 // ============================================================
 
-function templatesEmbed(guild) {
+function templatesEmbed() {
 
-  const data = getGuildData(guild.id);
+  const db =
+    loadDB();
+
+  const templates =
+    Object.values(
+      db.templates
+    );
 
   let description =
-    "Reusable server messages.\n\n";
+    "Universal server templates.\n\n";
 
-  if (!data.templates.length) {
+  if (!templates.length) {
 
     description +=
-      "No templates saved yet.";
+      "No templates saved yet.\n\n" +
+      "Use `/save <name>` to save this server.";
 
   } else {
 
-    data.templates
-      .slice(0, 10)
+    templates
+      .slice(0, 15)
       .forEach((template, index) => {
 
         description +=
-          `**${index + 1}. ${template.name}**\n` +
-          `${template.content.slice(0, 150)}\n\n`;
+          `**${index + 1}. ${template.displayName || template.name}**\n` +
+          `Roles: ${template.roles.length} • Channels: ${template.channels.length}\n\n`;
 
       });
-
   }
 
   return new EmbedBuilder()
 
-    .setTitle("📋 Templates")
+    .setTitle(
+      "📋 Universal Templates"
+    )
 
-    .setDescription(description);
+    .setDescription(
+      description
+    );
 }
 
 function templatesButtons() {
@@ -822,21 +1604,28 @@ function templatesButtons() {
     new ActionRowBuilder().addComponents(
 
       new ButtonBuilder()
-        .setCustomId("template_create")
-        .setLabel("Create Template")
-        .setEmoji("➕")
-        .setStyle(ButtonStyle.Success),
+        .setCustomId(
+          "template_list"
+        )
+        .setLabel("Refresh")
+        .setEmoji("🔄")
+        .setStyle(
+          ButtonStyle.Secondary
+        ),
 
       new ButtonBuilder()
-        .setCustomId("template_use")
-        .setLabel("Use Template")
-        .setEmoji("📨")
-        .setStyle(ButtonStyle.Primary)
+        .setCustomId(
+          "template_load"
+        )
+        .setLabel("Load Template")
+        .setEmoji("📥")
+        .setStyle(
+          ButtonStyle.Primary
+        )
 
     ),
 
     backButton()
-
   ];
 }
 
@@ -848,23 +1637,23 @@ function helpEmbed() {
 
   return new EmbedBuilder()
 
-    .setTitle("🥺 Help")
+    .setTitle(
+      "🥺 Help"
+    )
 
     .setDescription(
-      "**Need help?**\n\n" +
-
-      "Use the dashboard to manage the bot.\n\n" +
-
-      "**Contact**\n" +
-      "Contact the bot owner/server support team.\n\n" +
-
-      "**Dashboard Access**\n" +
-      "• Server owner\n" +
+      "**Dashboard access**\n" +
+      "• Server Owner\n" +
       "• Manage Server\n" +
       "• Manage Channels + Manage Roles\n\n" +
 
-      "Only one command is used:\n" +
-      "`/dashboard`"
+      "**Commands**\n" +
+      "`/dashboard` — Open control panel\n" +
+      "`/save <name>` — Save server template\n" +
+      "`/load <name>` — Load server template\n\n" +
+
+      "**Universal Templates**\n" +
+      "Templates store the server's roles, channels and bot configuration so they can be reused across servers."
     );
 }
 
@@ -876,76 +1665,267 @@ client.on(
   "interactionCreate",
   async interaction => {
 
-    if (!interaction.isChatInputCommand()) {
-      return;
-    }
-
     if (
-      interaction.commandName !==
-      "dashboard"
+      !interaction.isChatInputCommand()
     ) {
       return;
     }
 
-    if (!requireDashboard(interaction)) {
+    if (
+      interaction.commandName ===
+      "dashboard"
+    ) {
+
+      if (
+        !requireDashboard(
+          interaction
+        )
+      ) return;
+
+      const message =
+        await interaction.reply({
+
+          embeds: [
+            homeEmbed(
+              interaction.guild,
+              interaction.user
+            )
+          ],
+
+          components:
+            homeButtons(),
+
+          fetchReply: true
+
+        });
+
+      setTimeout(
+        async () => {
+
+          try {
+
+            await message.edit({
+
+              embeds: [
+
+                new EmbedBuilder()
+
+                  .setTitle(
+                    "⏱️ Dashboard Timed Out"
+                  )
+
+                  .setDescription(
+                    "This dashboard session expired after 5 minutes.\n\n" +
+                    "Run `/dashboard` to open another one."
+                  )
+
+                  .setTimestamp()
+
+              ],
+
+              components: []
+
+            });
+
+          } catch {}
+
+        },
+        5 * 60 * 1000
+      );
+
       return;
     }
 
-    const message =
-      await interaction.reply({
+    // ========================================================
+    // SAVE COMMAND
+    // ========================================================
 
-        embeds: [
-          homeEmbed(
-            interaction.guild,
-            interaction.user
-          )
-        ],
+    if (
+      interaction.commandName ===
+      "save"
+    ) {
 
-        components:
-          homeButtons(),
+      if (
+        !requireDashboard(
+          interaction
+        )
+      ) return;
 
-        fetchReply: true
+      const name =
+        interaction.options.getString(
+          "name",
+          true
+        );
 
+      await interaction.deferReply({
+        ephemeral: true
       });
 
+      try {
+
+        const template =
+          await saveTemplate(
+            interaction.guild,
+            name
+          );
+
+        return interaction.editReply({
+
+          embeds: [
+
+            new EmbedBuilder()
+
+              .setTitle(
+                "✅ Template Saved"
+              )
+
+              .setDescription(
+                `**${name}** has been saved as a universal server template.`
+              )
+
+              .addFields(
+
+                {
+                  name: "Roles",
+                  value:
+                    `${template.roles.length}`,
+                  inline: true
+                },
+
+                {
+                  name: "Channels",
+                  value:
+                    `${template.channels.length}`,
+                  inline: true
+                }
+
+              )
+
+              .setTimestamp()
+
+          ]
+
+        });
+
+      } catch (error) {
+
+        console.error(error);
+
+        return interaction.editReply(
+          "❌ Failed to save the server template."
+        );
+      }
+    }
+
     // ========================================================
-    // 5 MINUTE TIMEOUT
+    // LOAD COMMAND
     // ========================================================
 
-    setTimeout(
-      async () => {
+    if (
+      interaction.commandName ===
+      "load"
+    ) {
 
-        try {
+      if (
+        !requireDashboard(
+          interaction
+        )
+      ) return;
 
-          await message.edit({
+      const name =
+        interaction.options.getString(
+          "name",
+          true
+        );
 
-            embeds: [
+      const template =
+        getTemplate(name);
 
-              new EmbedBuilder()
+      if (!template) {
 
-                .setTitle(
-                  "⏱️ Dashboard Timed Out"
-                )
+        return interaction.reply({
 
-                .setDescription(
-                  "This dashboard session expired after 5 minutes.\n\n" +
-                  "Run `/dashboard` to open a new one."
-                )
+          content:
+            `❌ Template **${name}** doesn't exist.`,
 
-                .setTimestamp()
+          ephemeral: true
 
-            ],
+        });
+      }
 
-            components: []
+      const confirmRow =
+        new ActionRowBuilder()
+          .addComponents(
 
-          });
+            new ButtonBuilder()
+              .setCustomId(
+                `confirm_load:${name}`
+              )
+              .setLabel(
+                "Load Template"
+              )
+              .setEmoji("📥")
+              .setStyle(
+                ButtonStyle.Danger
+              ),
 
-        } catch {}
+            new ButtonBuilder()
+              .setCustomId(
+                "cancel_load"
+              )
+              .setLabel(
+                "Cancel"
+              )
+              .setStyle(
+                ButtonStyle.Secondary
+              )
 
-      },
-      5 * 60 * 1000
-    );
+          );
 
+      return interaction.reply({
+
+        embeds: [
+
+          new EmbedBuilder()
+
+            .setTitle(
+              "⚠️ Confirm Template Load"
+            )
+
+            .setDescription(
+              `You're about to load **${name}** into **${interaction.guild.name}**.\n\n` +
+              `This can create roles and channels and modify the bot's configuration.\n\n` +
+              "**Existing channels and roles are not automatically deleted.**"
+            )
+
+            .addFields(
+
+              {
+                name: "Roles",
+                value:
+                  `${template.roles.length}`,
+                inline: true
+              },
+
+              {
+                name: "Channels",
+                value:
+                  `${template.channels.length}`,
+                inline: true
+              }
+
+            )
+
+        ],
+
+        components: [
+          confirmRow
+        ],
+
+        ephemeral: true
+
+      });
+    }
   }
 );
 
@@ -957,12 +1937,100 @@ client.on(
   "interactionCreate",
   async interaction => {
 
-    if (!interaction.isButton()) {
-      return;
-    }
+    if (
+      !interaction.isButton()
+    ) return;
 
     const id =
       interaction.customId;
+
+    if (
+      id.startsWith(
+        "confirm_load:"
+      )
+    ) {
+
+      if (
+        !requireDashboard(
+          interaction
+        )
+      ) return;
+
+      const name =
+        id.substring(
+          "confirm_load:".length
+        );
+
+      const template =
+        getTemplate(name);
+
+      if (!template) {
+
+        return interaction.update({
+
+          content:
+            "❌ Template no longer exists.",
+
+          embeds: [],
+
+          components: []
+
+        });
+      }
+
+      await interaction.update({
+
+        content:
+          "⏳ Loading template...",
+
+        embeds: [],
+
+        components: []
+
+      });
+
+      try {
+
+        await loadTemplate(
+          interaction.guild,
+          template
+        );
+
+        return interaction.editReply({
+
+          content:
+            `✅ **${name}** has been loaded into **${interaction.guild.name}**.`
+
+        });
+
+      } catch (error) {
+
+        console.error(error);
+
+        return interaction.editReply({
+
+          content:
+            "❌ Something went wrong while loading the template."
+
+        });
+      }
+    }
+
+    if (
+      id === "cancel_load"
+    ) {
+
+      return interaction.update({
+
+        content:
+          "❌ Template load cancelled.",
+
+        embeds: [],
+
+        components: []
+
+      });
+    }
 
     const dashboardButton =
       id.startsWith("home_") ||
@@ -978,15 +2046,19 @@ client.on(
       return;
     }
 
-    if (!requireDashboard(interaction)) {
-      return;
-    }
+    if (
+      !requireDashboard(
+        interaction
+      )
+    ) return;
 
-    // ========================================================
+    // --------------------------------------------------------
     // HOME
-    // ========================================================
+    // --------------------------------------------------------
 
-    if (id === "go_home") {
+    if (
+      id === "go_home"
+    ) {
 
       return interaction.update({
 
@@ -1001,14 +2073,15 @@ client.on(
           homeButtons()
 
       });
-
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // HOME TABS
-    // ========================================================
+    // --------------------------------------------------------
 
-    if (id === "home_automation") {
+    if (
+      id === "home_automation"
+    ) {
 
       return interaction.update({
 
@@ -1022,10 +2095,11 @@ client.on(
           automationButtons()
 
       });
-
     }
 
-    if (id === "home_moderation") {
+    if (
+      id === "home_moderation"
+    ) {
 
       return interaction.update({
 
@@ -1039,10 +2113,11 @@ client.on(
           moderationButtons()
 
       });
-
     }
 
-    if (id === "home_lookup") {
+    if (
+      id === "home_lookup"
+    ) {
 
       return interaction.update({
 
@@ -1054,10 +2129,11 @@ client.on(
           lookupButtons()
 
       });
-
     }
 
-    if (id === "home_embeds") {
+    if (
+      id === "home_embeds"
+    ) {
 
       return interaction.update({
 
@@ -1069,27 +2145,27 @@ client.on(
           embedsButtons()
 
       });
-
     }
 
-    if (id === "home_templates") {
+    if (
+      id === "home_templates"
+    ) {
 
       return interaction.update({
 
         embeds: [
-          templatesEmbed(
-            interaction.guild
-          )
+          templatesEmbed()
         ],
 
         components:
           templatesButtons()
 
       });
-
     }
 
-    if (id === "home_settings") {
+    if (
+      id === "home_settings"
+    ) {
 
       return interaction.update({
 
@@ -1103,10 +2179,11 @@ client.on(
           settingsButtons()
 
       });
-
     }
 
-    if (id === "home_help") {
+    if (
+      id === "home_help"
+    ) {
 
       return interaction.update({
 
@@ -1118,12 +2195,11 @@ client.on(
           backButton()
 
       });
-
     }
 
-    // ========================================================
-    // AUTOMATION TOGGLES
-    // ========================================================
+    // --------------------------------------------------------
+    // AUTOMATION
+    // --------------------------------------------------------
 
     const data =
       getGuildData(
@@ -1152,7 +2228,9 @@ client.on(
 
     };
 
-    if (autoMap[id]) {
+    if (
+      autoMap[id]
+    ) {
 
       const key =
         autoMap[id];
@@ -1177,12 +2255,89 @@ client.on(
           automationButtons()
 
       });
-
     }
 
-    // ========================================================
-    // MODERATION TOGGLES
-    // ========================================================
+    // --------------------------------------------------------
+    // AUTO ROLE CONFIG
+    // --------------------------------------------------------
+
+    if (
+      id === "auto_roles"
+    ) {
+
+      const roleMenu =
+        new RoleSelectMenuBuilder()
+          .setCustomId(
+            "select_autorole"
+          )
+          .setPlaceholder(
+            "Select the automatic role"
+          )
+          .setMinValues(1)
+          .setMaxValues(1);
+
+      return interaction.reply({
+
+        content:
+          "👤 Select the role new members should automatically receive.",
+
+        components: [
+
+          new ActionRowBuilder()
+            .addComponents(
+              roleMenu
+            )
+
+        ],
+
+        ephemeral: true
+
+      });
+    }
+
+    // --------------------------------------------------------
+    // CHANNEL SETUP
+    // --------------------------------------------------------
+
+    if (
+      id === "automation_channels" ||
+      id === "setting_channels"
+    ) {
+
+      const menu =
+        new ChannelSelectMenuBuilder()
+          .setCustomId(
+            "select_channel_type"
+          )
+          .setPlaceholder(
+            "Choose a channel to configure"
+          )
+          .setChannelTypes(
+            ChannelType.GuildText
+          );
+
+      return interaction.reply({
+
+        content:
+          "📁 Select the channel you want to configure. The next menu will ask what it's for.",
+
+        components: [
+
+          new ActionRowBuilder()
+            .addComponents(
+              menu
+            )
+
+        ],
+
+        ephemeral: true
+
+      });
+    }
+
+    // --------------------------------------------------------
+    // MODERATION
+    // --------------------------------------------------------
 
     const modMap = {
 
@@ -1203,7 +2358,9 @@ client.on(
 
     };
 
-    if (modMap[id]) {
+    if (
+      modMap[id]
+    ) {
 
       const key =
         modMap[id];
@@ -1228,14 +2385,11 @@ client.on(
           moderationButtons()
 
       });
-
     }
 
-    // ========================================================
-    // MODERATION STATUS
-    // ========================================================
-
-    if (id === "mod_status") {
+    if (
+      id === "mod_status"
+    ) {
 
       return interaction.reply({
 
@@ -1248,14 +2402,15 @@ client.on(
         ephemeral: true
 
       });
-
     }
 
-    // ========================================================
-    // SETTINGS - BOT NAME
-    // ========================================================
+    // --------------------------------------------------------
+    // BOT NAME
+    // --------------------------------------------------------
 
-    if (id === "setting_botname") {
+    if (
+      id === "setting_botname"
+    ) {
 
       const modal =
         new ModalBuilder()
@@ -1272,16 +2427,13 @@ client.on(
             "botname"
           )
           .setLabel(
-            "Server Bot Nickname"
+            "Bot Nickname"
           )
           .setStyle(
             TextInputStyle.Short
           )
-          .setMaxLength(32)
           .setRequired(true)
-          .setPlaceholder(
-            "Enter the bot nickname"
-          );
+          .setMaxLength(32);
 
       modal.addComponents(
         new ActionRowBuilder()
@@ -1291,53 +2443,15 @@ client.on(
       return interaction.showModal(
         modal
       );
-
     }
 
-    // ========================================================
-    // SETTINGS - CHANNELS
-    // ========================================================
+    // --------------------------------------------------------
+    // USER LOOKUP
+    // --------------------------------------------------------
 
     if (
-      id === "setting_channels" ||
-      id === "automation_channels"
+      id === "lookup_user"
     ) {
-
-      const menu =
-        new ChannelSelectMenuBuilder()
-          .setCustomId(
-            "select_logchannel"
-          )
-          .setPlaceholder(
-            "Select the log/transcript channel"
-          )
-          .setChannelTypes(
-            ChannelType.GuildText
-          );
-
-      return interaction.reply({
-
-        content:
-          "📁 Select the channel to use for logs/transcripts.",
-
-        components: [
-
-          new ActionRowBuilder()
-            .addComponents(menu)
-
-        ],
-
-        ephemeral: true
-
-      });
-
-    }
-
-    // ========================================================
-    // LOOKUP USER
-    // ========================================================
-
-    if (id === "lookup_user") {
 
       const modal =
         new ModalBuilder()
@@ -1354,14 +2468,14 @@ client.on(
             "userid"
           )
           .setLabel(
-            "User ID"
+            "Discord User ID"
           )
           .setStyle(
             TextInputStyle.Short
           )
           .setRequired(true)
           .setPlaceholder(
-            "Enter a Discord user ID"
+            "123456789012345678"
           );
 
       modal.addComponents(
@@ -1372,22 +2486,28 @@ client.on(
       return interaction.showModal(
         modal
       );
-
     }
 
-    // ========================================================
-    // LOOKUP MESSAGES
-    // ========================================================
+    // --------------------------------------------------------
+    // MESSAGE SEARCH
+    // --------------------------------------------------------
 
-    if (id === "lookup_messages") {
+    if (
+      id === "lookup_messages" ||
+      id === "lookup_related"
+    ) {
 
       const modal =
         new ModalBuilder()
           .setCustomId(
-            "modal_lookup_messages"
+            id === "lookup_messages"
+              ? "modal_lookup_messages"
+              : "modal_related"
           )
           .setTitle(
-            "💬 Message Search"
+            id === "lookup_messages"
+              ? "💬 Message Search"
+              : "🔗 Related Messages"
           );
 
       const input =
@@ -1402,10 +2522,7 @@ client.on(
             TextInputStyle.Short
           )
           .setRequired(true)
-          .setMaxLength(100)
-          .setPlaceholder(
-            "Example: chat gpt sucks"
-          );
+          .setMaxLength(100);
 
       modal.addComponents(
         new ActionRowBuilder()
@@ -1415,56 +2532,15 @@ client.on(
       return interaction.showModal(
         modal
       );
-
     }
 
-    // ========================================================
-    // RELATED MESSAGE SEARCH
-    // ========================================================
-
-    if (id === "lookup_related") {
-
-      const modal =
-        new ModalBuilder()
-          .setCustomId(
-            "modal_related"
-          )
-          .setTitle(
-            "🔗 Related Messages"
-          );
-
-      const input =
-        new TextInputBuilder()
-          .setCustomId(
-            "query"
-          )
-          .setLabel(
-            "Words or phrase"
-          )
-          .setStyle(
-            TextInputStyle.Short
-          )
-          .setRequired(true)
-          .setPlaceholder(
-            "Example: chat gpt"
-          );
-
-      modal.addComponents(
-        new ActionRowBuilder()
-          .addComponents(input)
-      );
-
-      return interaction.showModal(
-        modal
-      );
-
-    }
-
-    // ========================================================
+    // --------------------------------------------------------
     // CREATE EMBED
-    // ========================================================
+    // --------------------------------------------------------
 
-    if (id === "embed_create") {
+    if (
+      id === "embed_create"
+    ) {
 
       const modal =
         new ModalBuilder()
@@ -1506,117 +2582,153 @@ client.on(
       modal.addComponents(
 
         new ActionRowBuilder()
-          .addComponents(title),
+          .addComponents(
+            title
+          ),
 
         new ActionRowBuilder()
-          .addComponents(description)
+          .addComponents(
+            description
+          )
 
       );
 
       return interaction.showModal(
         modal
       );
-
     }
 
-    // ========================================================
-    // CREATE TEMPLATE
-    // ========================================================
-
-    if (id === "template_create") {
-
-      const modal =
-        new ModalBuilder()
-          .setCustomId(
-            "modal_template"
-          )
-          .setTitle(
-            "📋 Create Template"
-          );
-
-      const name =
-        new TextInputBuilder()
-          .setCustomId(
-            "name"
-          )
-          .setLabel(
-            "Template Name"
-          )
-          .setStyle(
-            TextInputStyle.Short
-          )
-          .setRequired(true)
-          .setMaxLength(100);
-
-      const content =
-        new TextInputBuilder()
-          .setCustomId(
-            "content"
-          )
-          .setLabel(
-            "Message"
-          )
-          .setStyle(
-            TextInputStyle.Paragraph
-          )
-          .setRequired(true)
-          .setMaxLength(4000);
-
-      modal.addComponents(
-
-        new ActionRowBuilder()
-          .addComponents(name),
-
-        new ActionRowBuilder()
-          .addComponents(content)
-
-      );
-
-      return interaction.showModal(
-        modal
-      );
-
-    }
-
-    // ========================================================
+    // --------------------------------------------------------
     // SAVED EMBEDS
-    // ========================================================
+    // --------------------------------------------------------
 
-    if (id === "embed_saved") {
+    if (
+      id === "embed_saved"
+    ) {
 
       const embeds =
         data.embeds;
 
-      let text =
-        "🧱 **Saved Embeds**\n\n";
-
-      if (!embeds.length) {
-
-        text +=
-          "No saved embeds.";
-
-      } else {
-
-        embeds
-          .slice(0, 10)
-          .forEach((embed, index) => {
-
-            text +=
-              `${index + 1}. **${embed.title}**\n`;
-
-          });
-
-      }
+      const text =
+        embeds.length
+          ? embeds
+              .slice(0, 20)
+              .map(
+                (embed, index) =>
+                  `${index + 1}. **${embed.title}**`
+              )
+              .join("\n")
+          : "No saved embeds.";
 
       return interaction.reply({
 
-        content: text,
+        content:
+          `🧱 **Saved Embeds**\n\n${text}`,
+
         ephemeral: true
 
       });
-
     }
 
+    // --------------------------------------------------------
+    // TEMPLATE REFRESH
+    // --------------------------------------------------------
+
+    if (
+      id === "template_list"
+    ) {
+
+      return interaction.update({
+
+        embeds: [
+          templatesEmbed()
+        ],
+
+        components:
+          templatesButtons()
+
+      });
+    }
+
+    // --------------------------------------------------------
+    // TEMPLATE LOAD MENU
+    // --------------------------------------------------------
+
+    if (
+      id === "template_load"
+    ) {
+
+      const db =
+        loadDB();
+
+      const templates =
+        Object.values(
+          db.templates
+        );
+
+      if (!templates.length) {
+
+        return interaction.reply({
+
+          content:
+            "❌ No templates have been saved yet.",
+
+          ephemeral: true
+
+        });
+      }
+
+      const options =
+        templates
+          .slice(0, 25)
+          .map(template => ({
+            label:
+              (
+                template.displayName ||
+                template.name ||
+                "Template"
+              ).slice(0, 100),
+
+            value:
+              (
+                template.displayName ||
+                template.name
+              )
+                .toLowerCase()
+                .slice(0, 100),
+
+            description:
+              `${template.roles.length} roles • ${template.channels.length} channels`
+          }));
+
+      const menu =
+        new StringSelectMenuBuilder()
+          .setCustomId(
+            "select_template"
+          )
+          .setPlaceholder(
+            "Choose a template"
+          )
+          .addOptions(
+            options
+          );
+
+      return interaction.reply({
+
+        content:
+          "📥 Select the template you want to load.",
+
+        components: [
+
+          new ActionRowBuilder()
+            .addComponents(menu)
+
+        ],
+
+        ephemeral: true
+
+      });
+    }
   }
 );
 
@@ -1629,50 +2741,282 @@ client.on(
   async interaction => {
 
     if (
-      !interaction.isChannelSelectMenu()
+      !requireDashboard(
+        interaction
+      )
     ) {
-      return;
+      if (
+        interaction.isRoleSelectMenu() ||
+        interaction.isChannelSelectMenu() ||
+        interaction.isStringSelectMenu()
+      ) {
+        return;
+      }
     }
+
+    // --------------------------------------------------------
+    // AUTO ROLE
+    // --------------------------------------------------------
 
     if (
-      interaction.customId !==
-      "select_logchannel"
+      interaction.isRoleSelectMenu() &&
+      interaction.customId ===
+        "select_autorole"
     ) {
-      return;
-    }
 
-    if (!requireDashboard(interaction)) {
-      return;
-    }
+      const data =
+        getGuildData(
+          interaction.guild.id
+        );
 
-    const data =
-      getGuildData(
-        interaction.guild.id
+      data.autoRole.roleId =
+        interaction.values[0];
+
+      data.automation.autoRoles =
+        true;
+
+      updateGuild(
+        interaction.guild.id,
+        data
       );
 
-    const channelId =
-      interaction.values[0];
+      return interaction.update({
 
-    data.channels.logs =
-      channelId;
+        content:
+          `✅ Auto role set to <@&${interaction.values[0]}>.`,
 
-    data.channels.transcripts =
-      channelId;
+        components: []
 
-    updateGuild(
-      interaction.guild.id,
-      data
-    );
+      });
+    }
 
-    await interaction.update({
+    // --------------------------------------------------------
+    // CHANNEL TYPE SELECT
+    // --------------------------------------------------------
 
-      content:
-        `✅ <#${channelId}> is now the log/transcript channel.`,
+    if (
+      interaction.isChannelSelectMenu() &&
+      interaction.customId ===
+        "select_channel_type"
+    ) {
 
-      components: []
+      const channelId =
+        interaction.values[0];
 
-    });
+      const menu =
+        new StringSelectMenuBuilder()
+          .setCustomId(
+            `channel_purpose:${channelId}`
+          )
+          .setPlaceholder(
+            "What should this channel be used for?"
+          )
+          .addOptions(
 
+            {
+              label:
+                "Logs / Transcripts",
+              value:
+                "logs",
+              emoji:
+                "📜"
+            },
+
+            {
+              label:
+                "Welcome Messages",
+              value:
+                "welcome",
+              emoji:
+                "👋"
+            },
+
+            {
+              label:
+                "Goodbye Messages",
+              value:
+                "goodbye",
+              emoji:
+                "🚪"
+            },
+
+            {
+              label:
+                "Moderation Logs",
+              value:
+                "moderation",
+              emoji:
+                "🛡️"
+            }
+
+          );
+
+      return interaction.update({
+
+        content:
+          "📁 What should this channel be used for?",
+
+        components: [
+
+          new ActionRowBuilder()
+            .addComponents(
+              menu
+            )
+
+        ]
+
+      });
+    }
+
+    // --------------------------------------------------------
+    // CHANNEL PURPOSE
+    // --------------------------------------------------------
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId.startsWith(
+        "channel_purpose:"
+      )
+    ) {
+
+      const channelId =
+        interaction.customId.split(":")[1];
+
+      const purpose =
+        interaction.values[0];
+
+      const data =
+        getGuildData(
+          interaction.guild.id
+        );
+
+      if (
+        purpose === "logs"
+      ) {
+
+        data.channels.logs =
+          channelId;
+
+        data.channels.transcripts =
+          channelId;
+
+      }
+
+      if (
+        purpose === "welcome"
+      ) {
+
+        data.channels.welcome =
+          channelId;
+
+      }
+
+      if (
+        purpose === "goodbye"
+      ) {
+
+        data.channels.goodbye =
+          channelId;
+
+      }
+
+      if (
+        purpose === "moderation"
+      ) {
+
+        data.channels.moderation =
+          channelId;
+
+      }
+
+      updateGuild(
+        interaction.guild.id,
+        data
+      );
+
+      return interaction.update({
+
+        content:
+          `✅ <#${channelId}> configured for **${purpose}**.`,
+
+        components: []
+
+      });
+    }
+
+    // --------------------------------------------------------
+    // TEMPLATE SELECT
+    // --------------------------------------------------------
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId ===
+        "select_template"
+    ) {
+
+      const templateName =
+        interaction.values[0];
+
+      const template =
+        getTemplate(
+          templateName
+        );
+
+      if (!template) {
+
+        return interaction.update({
+
+          content:
+            "❌ That template no longer exists.",
+
+          components: []
+
+        });
+      }
+
+      const confirm =
+        new ActionRowBuilder()
+          .addComponents(
+
+            new ButtonBuilder()
+              .setCustomId(
+                `confirm_load:${templateName}`
+              )
+              .setLabel(
+                "Load Template"
+              )
+              .setEmoji("📥")
+              .setStyle(
+                ButtonStyle.Danger
+              ),
+
+            new ButtonBuilder()
+              .setCustomId(
+                "cancel_load"
+              )
+              .setLabel(
+                "Cancel"
+              )
+              .setStyle(
+                ButtonStyle.Secondary
+              )
+
+          );
+
+      return interaction.update({
+
+        content:
+          `⚠️ Load **${template.displayName || templateName}**?\n\n` +
+          `Roles: **${template.roles.length}**\n` +
+          `Channels: **${template.channels.length}**\n\n` +
+          "Existing server content will not automatically be deleted.",
+
+        components: [
+          confirm
+        ]
+
+      });
+    }
   }
 );
 
@@ -1684,22 +3028,24 @@ client.on(
   "interactionCreate",
   async interaction => {
 
-    if (!interaction.isModalSubmit()) {
-      return;
-    }
+    if (
+      !interaction.isModalSubmit()
+    ) return;
 
-    if (!requireDashboard(interaction)) {
-      return;
-    }
+    if (
+      !requireDashboard(
+        interaction
+      )
+    ) return;
 
     const data =
       getGuildData(
         interaction.guild.id
       );
 
-    // ========================================================
+    // --------------------------------------------------------
     // BOT NAME
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
       interaction.customId ===
@@ -1734,12 +3080,11 @@ client.on(
         ephemeral: true
 
       });
-
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // USER LOOKUP
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
       interaction.customId ===
@@ -1764,29 +3109,34 @@ client.on(
         return interaction.reply({
 
           content:
-            "❌ Couldn't find that member in this server.",
+            "❌ Couldn't find that member.",
 
           ephemeral: true
 
         });
-
       }
 
       const roles =
         member.roles.cache
-          .filter(role =>
-            role.id !==
-            interaction.guild.id
+          .filter(
+            role =>
+              role.id !==
+              interaction.guild.id
           )
-          .map(role => role.name)
+          .map(
+            role =>
+              `<@&${role.id}>`
+          )
           .slice(0, 20)
-          .join(", ") ||
+          .join(" ") ||
         "None";
 
       const embed =
         new EmbedBuilder()
 
-          .setTitle("🔎 User Lookup")
+          .setTitle(
+            "🔎 User Lookup"
+          )
 
           .setThumbnail(
             member.user.displayAvatarURL()
@@ -1803,9 +3153,12 @@ client.on(
             {
               name: "Joined",
               value:
-                `<t:${Math.floor(
-                  member.joinedTimestamp / 1000
-                )}:F>`
+                member.joinedTimestamp
+                  ? `<t:${Math.floor(
+                      member.joinedTimestamp /
+                      1000
+                    )}:F>`
+                  : "Unknown"
             },
 
             {
@@ -1814,26 +3167,30 @@ client.on(
                 roles
             }
 
-          );
+          )
+
+          .setTimestamp();
 
       return interaction.reply({
 
-        embeds: [embed],
+        embeds: [
+          embed
+        ],
+
         ephemeral: true
 
       });
-
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // MESSAGE SEARCH
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
       interaction.customId ===
-      "modal_lookup_messages" ||
+        "modal_lookup_messages" ||
       interaction.customId ===
-      "modal_related"
+        "modal_related"
     ) {
 
       const query =
@@ -1843,106 +3200,107 @@ client.on(
           )
           .toLowerCase();
 
-      await interaction.deferReply({
-        ephemeral: true
-      });
+      const db =
+        loadDB();
+
+      const guildData =
+        db.guilds[
+          interaction.guild.id
+        ];
+
+      if (!guildData) {
+
+        return interaction.reply({
+
+          content:
+            "❌ No message history exists yet.",
+
+          ephemeral: true
+
+        });
+      }
 
       const results = [];
 
-      const channels =
-        interaction.guild.channels.cache
-          .filter(channel =>
-            channel.type ===
-              ChannelType.GuildText &&
-            channel.viewable
-          );
-
       for (
-        const channel of channels.values()
+        const messages
+        of Object.values(
+          guildData.messageLog || {}
+        )
       ) {
 
-        if (results.length >= 20) {
-          break;
-        }
+        for (
+          const message
+          of messages
+        ) {
 
-        try {
+          if (
+            results.length >= 20
+          ) break;
 
-          const messages =
-            await channel.messages.fetch({
-              limit: 100
-            });
+          const content =
+            String(
+              message.content || ""
+            ).toLowerCase();
 
-          for (
-            const message of messages.values()
+          let match;
+
+          if (
+            interaction.customId ===
+            "modal_lookup_messages"
           ) {
 
-            if (
-              !message.content
-            ) {
-              continue;
-            }
+            match =
+              content.includes(query);
 
-            const content =
-              message.content.toLowerCase();
+          } else {
 
-            let match = false;
+            const words =
+              query
+                .split(/\s+/)
+                .filter(Boolean);
 
-            if (
-              interaction.customId ===
-              "modal_lookup_messages"
-            ) {
-
-              match =
-                content.includes(query);
-
-            } else {
-
-              const words =
-                query
-                  .split(/\s+/)
-                  .filter(Boolean);
-
-              match =
-                words.some(word =>
+            match =
+              words.some(
+                word =>
                   content.includes(word)
-                );
-
-            }
-
-            if (match) {
-
-              results.push(
-                `• ${message.author} in ${channel}\n` +
-                `  ${message.content.slice(0, 250)}\n` +
-                `  [message](https://discord.com/channels/${interaction.guild.id}/${channel.id}/${message.id})`
               );
-
-            }
-
-            if (results.length >= 20) {
-              break;
-            }
-
           }
 
-        } catch {}
+          if (match) {
 
+            results.push(
+              `• **${message.username}**\n` +
+              `${String(
+                message.content || "[No text]"
+              ).slice(0, 300)}\n` +
+              `\`${new Date(
+                message.timestamp
+              ).toLocaleString()}\``
+            );
+          }
+        }
+
+        if (
+          results.length >= 20
+        ) break;
       }
 
-      return interaction.editReply({
+      return interaction.reply({
 
         content:
           results.length
-            ? `🔎 **Results for:** \`${query}\`\n\n${results.join("\n\n")}`
-            : `❌ No accessible messages found for \`${query}\`.`
+            ? `🔎 Results for \`${query}\`\n\n${results.join("\n\n")}`
+            : `❌ No stored messages matched \`${query}\`.`,
+
+        ephemeral: true
 
       });
-
     }
 
-    // ========================================================
+    // --------------------------------------------------------
     // EMBED
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
       interaction.customId ===
@@ -1975,79 +3333,31 @@ client.on(
         data
       );
 
-      const embed =
-        new EmbedBuilder()
-          .setTitle(title)
-          .setDescription(description)
-          .setFooter({
-            text:
-              interaction.guild.name
-          });
-
       return interaction.reply({
 
         content:
           "✅ Embed created and saved.",
 
-        embeds: [embed],
+        embeds: [
+
+          new EmbedBuilder()
+            .setTitle(title)
+            .setDescription(
+              description
+            )
+            .setTimestamp()
+
+        ],
 
         ephemeral: true
 
       });
-
     }
-
-    // ========================================================
-    // TEMPLATE
-    // ========================================================
-
-    if (
-      interaction.customId ===
-      "modal_template"
-    ) {
-
-      const name =
-        interaction.fields
-          .getTextInputValue(
-            "name"
-          );
-
-      const content =
-        interaction.fields
-          .getTextInputValue(
-            "content"
-          );
-
-      data.templates.push({
-
-        name,
-        content,
-        created:
-          Date.now()
-
-      });
-
-      updateGuild(
-        interaction.guild.id,
-        data
-      );
-
-      return interaction.reply({
-
-        content:
-          `✅ Template **${name}** saved.`,
-
-        ephemeral: true
-
-      });
-
-    }
-
   }
 );
 
 // ============================================================
-// MESSAGE LOGGING
+// MESSAGE CREATE
 // ============================================================
 
 client.on(
@@ -2057,9 +3367,7 @@ client.on(
     if (
       !message.guild ||
       message.author.bot
-    ) {
-      return;
-    }
+    ) return;
 
     const data =
       getGuildData(
@@ -2067,7 +3375,7 @@ client.on(
       );
 
     // --------------------------------------------------------
-    // Saved message history for lookup
+    // MESSAGE HISTORY
     // --------------------------------------------------------
 
     if (
@@ -2086,7 +3394,8 @@ client.on(
       message.channel.id
     ].push({
 
-      id: message.id,
+      id:
+        message.id,
 
       user:
         message.author.id,
@@ -2102,7 +3411,6 @@ client.on(
 
     });
 
-    // Keep only latest 200
     data.messageLog[
       message.channel.id
     ] =
@@ -2111,7 +3419,7 @@ client.on(
       ].slice(-200);
 
     // --------------------------------------------------------
-    // Auto chat logs
+    // CHAT LOGS
     // --------------------------------------------------------
 
     if (
@@ -2167,13 +3475,11 @@ client.on(
           ]
 
         }).catch(() => {});
-
       }
-
     }
 
     // --------------------------------------------------------
-    // Anti spam
+    // ANTI SPAM
     // --------------------------------------------------------
 
     if (
@@ -2183,13 +3489,13 @@ client.on(
       const recent =
         data.messageLog[
           message.channel.id
-        ];
+        ] || [];
 
       const userMessages =
         recent.filter(
           msg =>
             msg.user ===
-            message.author.id &&
+              message.author.id &&
             Date.now() -
               msg.timestamp <
               5000
@@ -2200,17 +3506,31 @@ client.on(
         message.member?.moderatable
       ) {
 
-        await message.member.timeout(
-          30_000,
-          "Automatic anti-spam"
-        ).catch(() => {});
+        await message.member
+          .timeout(
+            30_000,
+            "Automatic anti-spam"
+          )
+          .catch(() => {});
 
+        if (
+          data.channels.moderation
+        ) {
+
+          const modChannel =
+            message.guild.channels.cache.get(
+              data.channels.moderation
+            );
+
+          modChannel?.send(
+            `🛡️ ${message.author} was timed out for suspected spam.`
+          ).catch(() => {});
+        }
       }
-
     }
 
     // --------------------------------------------------------
-    // Anti links
+    // ANTI LINKS
     // --------------------------------------------------------
 
     if (
@@ -2220,71 +3540,90 @@ client.on(
       const url =
         /(https?:\/\/|www\.)/i;
 
+      const bypass =
+        message.member?.permissions.has(
+          PermissionsBitField.Flags.ManageMessages
+        );
+
       if (
-        url.test(message.content) &&
-        message.member &&
-        !message.member.permissions.has(
+        url.test(
+          message.content
+        ) &&
+        !bypass
+      ) {
+
+        await message.delete()
+          .catch(() => {});
+      }
+    }
+
+    // --------------------------------------------------------
+    // ANTI MASS MENTION
+    // --------------------------------------------------------
+
+    if (
+      data.moderation.antiMassMention &&
+      message.mentions.users.size >= 5
+    ) {
+
+      await message.delete()
+        .catch(() => {});
+    }
+
+    // --------------------------------------------------------
+    // SIMPLE AUTOMOD
+    // --------------------------------------------------------
+
+    if (
+      data.moderation.automod
+    ) {
+
+      const bannedPatterns = [
+        "discord.gg/",
+        "@everyone",
+        "@here"
+      ];
+
+      const lower =
+        message.content.toLowerCase();
+
+      const matched =
+        bannedPatterns.some(
+          pattern =>
+            lower.includes(
+              pattern
+            )
+        );
+
+      if (
+        matched &&
+        !message.member?.permissions.has(
           PermissionsBitField.Flags.ManageMessages
         )
       ) {
 
         await message.delete()
           .catch(() => {});
-
       }
-
-    }
-
-    // --------------------------------------------------------
-    // Anti mass mention
-    // --------------------------------------------------------
-
-    if (
-      data.moderation.antiMassMention
-    ) {
-
-      if (
-        message.mentions.users.size >= 5
-      ) {
-
-        await message.delete()
-          .catch(() => {});
-
-      }
-
-    }
-
-    // --------------------------------------------------------
-    // Auto role
-    // --------------------------------------------------------
-
-    if (
-      data.automation.autoRoles
-    ) {
-
-      // Role can be added later through
-      // dashboard configuration.
-
     }
 
     saveDB(
       loadDB()
     );
-
   }
 );
 
 // ============================================================
-// MESSAGE DELETE LOG
+// MESSAGE DELETE
 // ============================================================
 
 client.on(
   "messageDelete",
   async message => {
 
-    if (!message.guild) {
-      return;
-    }
+    if (
+      !message.guild
+    ) return;
 
     const data =
       getGuildData(
@@ -2294,18 +3633,14 @@ client.on(
     if (
       !data.automation.autoDeleteLogs ||
       !data.channels.logs
-    ) {
-      return;
-    }
+    ) return;
 
     const channel =
       message.guild.channels.cache.get(
         data.channels.logs
       );
 
-    if (!channel) {
-      return;
-    }
+    if (!channel) return;
 
     await channel.send({
 
@@ -2336,9 +3671,10 @@ client.on(
             {
               name: "Content",
               value:
-                message.content
-                  ?.slice(0, 1000) ||
-                "[Content unavailable]"
+                String(
+                  message.content ||
+                  "[Content unavailable]"
+                ).slice(0, 1000)
             }
 
           )
@@ -2348,7 +3684,6 @@ client.on(
       ]
 
     }).catch(() => {});
-
   }
 );
 
@@ -2365,31 +3700,54 @@ client.on(
         member.guild.id
       );
 
-    if (
-      !data.automation.autoJoins
-    ) {
-      return;
-    }
+    // --------------------------------------------------------
+    // AUTO ROLE
+    // --------------------------------------------------------
 
     if (
-      !data.channels.welcome
+      data.automation.autoRoles &&
+      data.autoRole.roleId
     ) {
-      return;
+
+      const role =
+        member.guild.roles.cache.get(
+          data.autoRole.roleId
+        );
+
+      if (
+        role &&
+        role.position <
+          member.guild.members.me.roles.highest.position
+      ) {
+
+        await member.roles.add(
+          role,
+          "Zynko automatic role"
+        ).catch(() => {});
+      }
     }
 
-    const channel =
-      member.guild.channels.cache.get(
-        data.channels.welcome
-      );
+    // --------------------------------------------------------
+    // WELCOME
+    // --------------------------------------------------------
 
-    if (!channel) {
-      return;
+    if (
+      data.automation.autoJoins &&
+      data.channels.welcome
+    ) {
+
+      const channel =
+        member.guild.channels.cache.get(
+          data.channels.welcome
+        );
+
+      if (channel) {
+
+        await channel.send(
+          `👋 Welcome ${member} to **${member.guild.name}**!`
+        ).catch(() => {});
+      }
     }
-
-    await channel.send(
-      `👋 Welcome ${member} to **${member.guild.name}**!`
-    ).catch(() => {});
-
   }
 );
 
@@ -2407,30 +3765,20 @@ client.on(
       );
 
     if (
-      !data.automation.autoGoodbyes
-    ) {
-      return;
-    }
-
-    if (
+      !data.automation.autoGoodbyes ||
       !data.channels.goodbye
-    ) {
-      return;
-    }
+    ) return;
 
     const channel =
       member.guild.channels.cache.get(
         data.channels.goodbye
       );
 
-    if (!channel) {
-      return;
-    }
+    if (!channel) return;
 
     await channel.send(
       `🚪 **${member.user.username}** has left the server.`
     ).catch(() => {});
-
   }
 );
 
@@ -2443,7 +3791,7 @@ client.once(
   async () => {
 
     console.log(
-      `✅ ${client.user.tag} is online`
+      `✅ ${client.user.tag} is online.`
     );
 
     client.user.setActivity(
@@ -2454,6 +3802,17 @@ client.once(
       }
     );
 
+    try {
+
+      await registerCommands();
+
+    } catch (error) {
+
+      console.error(
+        "❌ Command registration failed:",
+        error
+      );
+    }
   }
 );
 
@@ -2464,20 +3823,24 @@ client.once(
 client.on(
   "error",
   error => {
+
     console.error(
       "Discord error:",
       error
     );
+
   }
 );
 
 process.on(
   "unhandledRejection",
   error => {
+
     console.error(
       "Unhandled rejection:",
       error
     );
+
   }
 );
 
@@ -2485,15 +3848,4 @@ process.on(
 // LOGIN
 // ============================================================
 
-if (!process.env.TOKEN) {
-
-  console.error(
-    "❌ TOKEN environment variable is missing."
-  );
-
-  process.exit(1);
-}
-
-client.login(
-  process.env.TOKEN
-);
+client.login(TOKEN);
