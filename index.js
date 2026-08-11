@@ -1,29 +1,30 @@
 // ============================================================
-// ZYNKO CONTROL BOT — FULL SERVER TEMPLATE / CLONER
+// ZYNKO CONTROL BOT — UNIVERSAL SERVER TEMPLATE
 // ============================================================
-// Features:
 // /dashboard
 // /save <name>
 // /load <name>
 //
-// Copies:
-// • Roles + hierarchy
+// COPIES:
+// • Roles
 // • Role permissions
+// • Role hierarchy
 // • Categories
 // • Text channels
 // • Voice channels
 // • Channel positions
 // • Topics
 // • Slowmode
-// • NSFW status
-// • Channel permission overwrites
-// • Admin-only / role-only channel visibility
-// • Zynko automation settings
+// • NSFW
+// • Permission overwrites
+// • Admin-only / role-only channels
 //
-// IMPORTANT:
-// Discord does not allow bots to copy server ownership,
-// integrations, some community settings, or anything the bot
-// itself does not have permission to manage.
+// SPECIAL:
+// • Skips Invite Tracker role
+// • Handles Discord's 250-role limit
+// • Preserves @everyone overwrites
+// • Preserves role-only channel visibility
+// • Does NOT copy user-specific permission overwrites
 // ============================================================
 
 const {
@@ -37,8 +38,6 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
-  RoleSelectMenuBuilder,
-  ChannelSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -64,8 +63,13 @@ if (!TOKEN) {
 const PORT = process.env.PORT || 3000;
 const DB_FILE = "./database.json";
 
+// Roles that should NEVER be created by the template system.
+const SKIPPED_ROLES = new Set([
+  "Invite Tracker"
+]);
+
 // ============================================================
-// KEEP ALIVE
+// WEB SERVER
 // ============================================================
 
 const app = express();
@@ -78,7 +82,7 @@ app.get("/health", (req, res) => {
   res.json({
     online: true,
     uptime: process.uptime(),
-    servers: client?.guilds?.cache?.size || 0
+    servers: client ? client.guilds.cache.size : 0
   });
 });
 
@@ -138,10 +142,14 @@ function ensureDatabase() {
   if (!fs.existsSync(DB_FILE)) {
     fs.writeFileSync(
       DB_FILE,
-      JSON.stringify({
-        guilds: {},
-        templates: {}
-      }, null, 2)
+      JSON.stringify(
+        {
+          guilds: {},
+          templates: {}
+        },
+        null,
+        2
+      )
     );
   }
 }
@@ -186,7 +194,9 @@ function getGuildData(guildId) {
 
 function updateGuild(guildId, data) {
   const db = loadDB();
+
   db.guilds[guildId] = data;
+
   saveDB(db);
 }
 
@@ -204,7 +214,7 @@ const client = new Client({
 });
 
 // ============================================================
-// SESSIONS
+// DASHBOARD SESSIONS
 // ============================================================
 
 const sessions = new Map();
@@ -221,14 +231,16 @@ function createSession(messageId, userId) {
 }
 
 function validSession(interaction) {
-  const session = sessions.get(
-    interaction.message?.id
-  );
+  const messageId = interaction.message?.id;
+
+  if (!messageId) return false;
+
+  const session = sessions.get(messageId);
 
   if (!session) return false;
 
   if (Date.now() > session.expires) {
-    sessions.delete(interaction.message.id);
+    sessions.delete(messageId);
     return false;
   }
 
@@ -251,13 +263,17 @@ function hasAccess(interaction) {
     member.permissions.has(
       PermissionsBitField.Flags.Administrator
     )
-  ) return true;
+  ) {
+    return true;
+  }
 
   if (
     member.permissions.has(
       PermissionsBitField.Flags.ManageGuild
     )
-  ) return true;
+  ) {
+    return true;
+  }
 
   return (
     member.permissions.has(
@@ -276,15 +292,19 @@ async function requireAccess(interaction) {
     "❌ You don't have permission to use the Zynko dashboard.";
 
   if (interaction.replied || interaction.deferred) {
-    await interaction.followUp({
-      content: text,
-      ephemeral: true
-    }).catch(() => {});
+    await interaction
+      .followUp({
+        content: text,
+        ephemeral: true
+      })
+      .catch(() => {});
   } else {
-    await interaction.reply({
-      content: text,
-      ephemeral: true
-    }).catch(() => {});
+    await interaction
+      .reply({
+        content: text,
+        ephemeral: true
+      })
+      .catch(() => {});
   }
 
   return false;
@@ -311,7 +331,7 @@ function channelMention(guild, id) {
 }
 
 // ============================================================
-// SERVER CLONE — ROLE SERIALIZATION
+// ROLE SERIALIZATION
 // ============================================================
 
 function serializeRole(role) {
@@ -327,26 +347,38 @@ function serializeRole(role) {
 }
 
 // ============================================================
-// SERVER CLONE — OVERWRITE SERIALIZATION
+// PERMISSION OVERWRITE SERIALIZATION
 // ============================================================
 
 function serializeOverwrites(channel) {
-  return channel.permissionOverwrites.cache.map(overwrite => ({
-    id: overwrite.id,
-    type: overwrite.type,
-    allow: overwrite.allow.bitfield.toString(),
-    deny: overwrite.deny.bitfield.toString()
-  }));
+  return channel.permissionOverwrites.cache.map(
+    overwrite => ({
+      id: overwrite.id,
+
+      // Discord:
+      // 0 = role
+      // 1 = member
+      type: overwrite.type,
+
+      allow:
+        overwrite.allow.bitfield.toString(),
+
+      deny:
+        overwrite.deny.bitfield.toString()
+    })
+  );
 }
 
 // ============================================================
-// SERVER CLONE — CHANNEL SERIALIZATION
+// CHANNEL SERIALIZATION
 // ============================================================
 
 function serializeChannel(channel) {
   return {
     id: channel.id,
+
     name: channel.name,
+
     type: channel.type,
 
     position: channel.rawPosition,
@@ -389,21 +421,40 @@ function serializeChannel(channel) {
 }
 
 // ============================================================
-// FULL SERVER SNAPSHOT
+// CREATE SERVER SNAPSHOT
 // ============================================================
 
 function createServerSnapshot(guild) {
   const roles = guild.roles.cache
-    .filter(role => role.id !== guild.id)
-    .sort((a, b) => b.position - a.position)
+    .filter(role => {
+      if (role.id === guild.id) return false;
+
+      // Don't save bot-managed Invite Tracker role.
+      if (
+        SKIPPED_ROLES.has(
+          role.name
+        )
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        b.position - a.position
+    )
     .map(serializeRole);
 
   const channels = guild.channels.cache
-    .sort((a, b) => a.rawPosition - b.rawPosition)
+    .sort(
+      (a, b) =>
+        a.rawPosition - b.rawPosition
+    )
     .map(serializeChannel);
 
   return {
-    version: 2,
+    version: 3,
 
     guild: {
       id: guild.id,
@@ -420,103 +471,223 @@ function createServerSnapshot(guild) {
 }
 
 // ============================================================
-// FIND ROLE BY SAVED ID
-// ============================================================
-
-function findMappedRoleId(roleMap, savedRoleId) {
-  return roleMap[savedRoleId] || null;
-}
-
-// ============================================================
-// APPLY ROLE PERMISSIONS
+// ROLE RESTORE
 // ============================================================
 
 async function restoreRoles(guild, snapshot) {
   const roleMap = {};
 
-  // @everyone
+  // VERY IMPORTANT:
+  // Source @everyone -> destination @everyone
   roleMap[snapshot.guild.id] = guild.id;
 
-  // Discord requires roles to exist before overwrites
-  // can reference them.
+  // Discord allows only 250 roles total.
+  const availableSlots =
+    250 -
+    guild.roles.cache.size;
 
-  const sortedRoles = [...snapshot.roles]
-    .sort((a, b) => a.position - b.position);
+  console.log(
+    `🎭 Existing roles: ${guild.roles.cache.size}`
+  );
+
+  console.log(
+    `🎭 Available role slots: ${availableSlots}`
+  );
+
+  const sortedRoles = [
+    ...snapshot.roles
+  ].sort(
+    (a, b) =>
+      a.position - b.position
+  );
+
+  let createdCount = 0;
 
   for (const savedRole of sortedRoles) {
-    let existing = guild.roles.cache.find(
-      r =>
-        r.name === savedRole.name &&
-        r.id !== guild.id
-    );
+    // Explicit skip.
+    if (
+      SKIPPED_ROLES.has(
+        savedRole.name
+      )
+    ) {
+      console.log(
+        `⏭️ Skipping role: ${savedRole.name}`
+      );
+
+      continue;
+    }
+
+    let existing =
+      guild.roles.cache.find(
+        role =>
+          role.name ===
+            savedRole.name &&
+          role.id !== guild.id
+      );
 
     try {
-      if (!existing) {
-        existing = await guild.roles.create({
-          name: savedRole.name,
-          permissions: BigInt(savedRole.permissions),
-          hoist: savedRole.hoist,
-          mentionable: savedRole.mentionable,
-          reason: "Zynko server template"
-        });
-      } else {
-        await existing.edit({
-          name: savedRole.name,
-          permissions: BigInt(savedRole.permissions),
-          hoist: savedRole.hoist,
-          mentionable: savedRole.mentionable,
-          reason: "Zynko server template"
-        }).catch(() => {});
+      // --------------------------------------------------------
+      // EXISTING ROLE
+      // --------------------------------------------------------
+
+      if (existing) {
+        roleMap[savedRole.id] =
+          existing.id;
+
+        // Only edit if bot can manage it.
+        if (
+          existing.editable
+        ) {
+          await existing.edit({
+            name:
+              savedRole.name,
+
+            permissions:
+              BigInt(
+                savedRole.permissions
+              ),
+
+            hoist:
+              savedRole.hoist,
+
+            mentionable:
+              savedRole.mentionable,
+
+            color:
+              savedRole.color,
+
+            reason:
+              "Zynko server template"
+          }).catch(() => {});
+        }
+
+        continue;
       }
 
-      roleMap[savedRole.id] = existing.id;
+      // --------------------------------------------------------
+      // ROLE LIMIT
+      // --------------------------------------------------------
+
+      if (
+        createdCount >=
+        availableSlots
+      ) {
+        console.log(
+          `⚠️ Role limit reached. Skipping: ${savedRole.name}`
+        );
+
+        continue;
+      }
+
+      // --------------------------------------------------------
+      // CREATE ROLE
+      // --------------------------------------------------------
+
+      existing =
+        await guild.roles.create({
+          name:
+            savedRole.name,
+
+          permissions:
+            BigInt(
+              savedRole.permissions
+            ),
+
+          hoist:
+            savedRole.hoist,
+
+          mentionable:
+            savedRole.mentionable,
+
+          color:
+            savedRole.color,
+
+          reason:
+            "Zynko server template"
+        });
+
+      createdCount++;
+
+      roleMap[savedRole.id] =
+        existing.id;
+
+      console.log(
+        `✅ Created role: ${savedRole.name}`
+      );
+
     } catch (error) {
-      console.error(
-        `Role restore failed: ${savedRole.name}`,
-        error.message
+      console.log(
+        `⚠️ Could not restore role ${savedRole.name}: ${error.message}`
       );
     }
   }
 
-  // Restore hierarchy
+  // ==========================================================
+  // RESTORE HIERARCHY
+  // ==========================================================
+
   const hierarchy = [];
 
-  for (const savedRole of snapshot.roles) {
-    const newId = roleMap[savedRole.id];
+  for (
+    const savedRole of snapshot.roles
+  ) {
+    const newId =
+      roleMap[savedRole.id];
 
     if (!newId) continue;
 
-    const role = guild.roles.cache.get(newId);
+    const role =
+      guild.roles.cache.get(
+        newId
+      );
 
     if (!role) continue;
 
+    if (!role.editable) continue;
+
     hierarchy.push({
       id: role.id,
-      position: savedRole.position
+      position:
+        savedRole.position
     });
   }
 
-  hierarchy.sort((a, b) => a.position - b.position);
+  hierarchy.sort(
+    (a, b) =>
+      a.position - b.position
+  );
 
   try {
-    await guild.roles.setPositions(
-      hierarchy.map(r => ({
-        role: r.id,
-        position: r.position
-      }))
-    );
+    if (hierarchy.length) {
+      await guild.roles.setPositions(
+        hierarchy.map(role => ({
+          role:
+            role.id,
+
+          position:
+            role.position
+        }))
+      );
+    }
   } catch (error) {
     console.log(
-      "⚠️ Some role positions could not be restored:",
-      error.message
+      `⚠️ Role hierarchy could not be fully restored: ${error.message}`
     );
   }
+
+  console.log(
+    `🎭 Roles created: ${createdCount}`
+  );
+
+  console.log(
+    `🎭 Role mappings: ${Object.keys(roleMap).length}`
+  );
 
   return roleMap;
 }
 
 // ============================================================
-// CREATE / UPDATE CATEGORIES
+// CATEGORY RESTORE
 // ============================================================
 
 async function restoreCategories(
@@ -526,30 +697,50 @@ async function restoreCategories(
 ) {
   const channelMap = {};
 
-  const categories = snapshot.channels
-    .filter(c =>
-      c.type === ChannelType.GuildCategory
-    )
-    .sort((a, b) => a.position - b.position);
+  const categories =
+    snapshot.channels
+      .filter(
+        channel =>
+          channel.type ===
+          ChannelType.GuildCategory
+      )
+      .sort(
+        (a, b) =>
+          a.position - b.position
+      );
 
-  for (const saved of categories) {
-    let category = guild.channels.cache.find(
-      c =>
-        c.type === ChannelType.GuildCategory &&
-        c.name === saved.name
-    );
+  for (
+    const saved of categories
+  ) {
+    let category =
+      guild.channels.cache.find(
+        channel =>
+          channel.type ===
+            ChannelType.GuildCategory &&
+          channel.name ===
+            saved.name
+      );
 
     try {
       if (!category) {
-        category = await guild.channels.create({
-          name: saved.name,
-          type: ChannelType.GuildCategory,
-          position: saved.position,
-          reason: "Zynko server template"
-        });
+        category =
+          await guild.channels.create({
+            name:
+              saved.name,
+
+            type:
+              ChannelType.GuildCategory,
+
+            position:
+              saved.position,
+
+            reason:
+              "Zynko server template"
+          });
       }
 
-      channelMap[saved.id] = category.id;
+      channelMap[saved.id] =
+        category.id;
 
       await applyOverwrites(
         category,
@@ -557,13 +748,15 @@ async function restoreCategories(
         roleMap
       );
 
-      await category.setPosition(
-        saved.position
-      ).catch(() => {});
+      await category
+        .setPosition(
+          saved.position
+        )
+        .catch(() => {});
+
     } catch (error) {
-      console.error(
-        `Category restore failed: ${saved.name}`,
-        error.message
+      console.log(
+        `⚠️ Category failed: ${saved.name} — ${error.message}`
       );
     }
   }
@@ -572,7 +765,7 @@ async function restoreCategories(
 }
 
 // ============================================================
-// CREATE / UPDATE NORMAL CHANNELS
+// NORMAL CHANNEL RESTORE
 // ============================================================
 
 async function restoreChannels(
@@ -581,82 +774,167 @@ async function restoreChannels(
   roleMap,
   channelMap
 ) {
-  const normalChannels = snapshot.channels
-    .filter(c =>
-      c.type !== ChannelType.GuildCategory
-    )
-    .sort((a, b) => a.position - b.position);
+  const normalChannels =
+    snapshot.channels
+      .filter(
+        channel =>
+          channel.type !==
+          ChannelType.GuildCategory
+      )
+      .sort(
+        (a, b) =>
+          a.position - b.position
+      );
 
-  for (const saved of normalChannels) {
-    let channel = guild.channels.cache.find(
-      c =>
-        c.name === saved.name &&
-        c.type === saved.type
-    );
+  for (
+    const saved of normalChannels
+  ) {
+    let channel =
+      guild.channels.cache.find(
+        c =>
+          c.name === saved.name &&
+          c.type === saved.type
+      );
 
     const parentId =
       saved.parentId
-        ? channelMap[saved.parentId] || null
+        ? channelMap[
+            saved.parentId
+          ] || null
         : null;
 
     try {
+      // ========================================================
+      // CREATE
+      // ========================================================
+
       if (!channel) {
         const options = {
-          name: saved.name,
-          type: saved.type,
-          parent: parentId,
-          position: saved.position,
-          reason: "Zynko server template"
+          name:
+            saved.name,
+
+          type:
+            saved.type,
+
+          parent:
+            parentId,
+
+          position:
+            saved.position,
+
+          reason:
+            "Zynko server template"
         };
 
         if (
-          saved.type === ChannelType.GuildText
+          saved.type ===
+          ChannelType.GuildText
         ) {
-          options.topic = saved.topic || undefined;
-          options.nsfw = !!saved.nsfw;
+          options.topic =
+            saved.topic ||
+            undefined;
+
+          options.nsfw =
+            !!saved.nsfw;
+
           options.rateLimitPerUser =
-            saved.rateLimitPerUser || 0;
+            saved.rateLimitPerUser ||
+            0;
         }
 
         if (
-          saved.type === ChannelType.GuildVoice
+          saved.type ===
+          ChannelType.GuildVoice
         ) {
-          if (saved.bitrate) {
-            options.bitrate = saved.bitrate;
+          if (
+            saved.bitrate
+          ) {
+            options.bitrate =
+              saved.bitrate;
           }
 
-          if (saved.userLimit) {
-            options.userLimit = saved.userLimit;
+          if (
+            saved.userLimit
+          ) {
+            options.userLimit =
+              saved.userLimit;
           }
 
-          if (saved.rtcRegion) {
-            options.rtcRegion = saved.rtcRegion;
+          if (
+            saved.rtcRegion
+          ) {
+            options.rtcRegion =
+              saved.rtcRegion;
           }
         }
 
         channel =
-          await guild.channels.create(options);
-      } else {
+          await guild.channels.create(
+            options
+          );
+      }
+
+      // ========================================================
+      // UPDATE EXISTING
+      // ========================================================
+
+      else {
         await channel.edit({
-          parent: parentId,
-          position: saved.position,
-          reason: "Zynko server template"
+          parent:
+            parentId,
+
+          position:
+            saved.position,
+
+          reason:
+            "Zynko server template"
         }).catch(() => {});
 
         if (
-          saved.type === ChannelType.GuildText
+          saved.type ===
+          ChannelType.GuildText
         ) {
           await channel.edit({
-            topic: saved.topic || null,
-            nsfw: !!saved.nsfw,
+            topic:
+              saved.topic ||
+              null,
+
+            nsfw:
+              !!saved.nsfw,
+
             rateLimitPerUser:
-              saved.rateLimitPerUser || 0,
-            reason: "Zynko server template"
+              saved.rateLimitPerUser ||
+              0,
+
+            reason:
+              "Zynko server template"
           }).catch(() => {});
         }
       }
 
-      channelMap[saved.id] = channel.id;
+      channelMap[saved.id] =
+        channel.id;
+
+      // ========================================================
+      // THIS IS THE IMPORTANT PART
+      // ========================================================
+      //
+      // Rebuild the exact ROLE permission overwrites.
+      //
+      // Example source:
+      //
+      // @everyone:
+      // VIEW_CHANNEL = DENY
+      //
+      // Admin:
+      // VIEW_CHANNEL = ALLOW
+      //
+      // Moderator:
+      // VIEW_CHANNEL = ALLOW
+      //
+      // Destination receives the same structure.
+      //
+      // ========================================================
 
       await applyOverwrites(
         channel,
@@ -664,20 +942,22 @@ async function restoreChannels(
         roleMap
       );
 
-      await channel.setPosition(
-        saved.position
-      ).catch(() => {});
+      await channel
+        .setPosition(
+          saved.position
+        )
+        .catch(() => {});
+
     } catch (error) {
-      console.error(
-        `Channel restore failed: ${saved.name}`,
-        error.message
+      console.log(
+        `⚠️ Channel failed: ${saved.name} — ${error.message}`
       );
     }
   }
 }
 
 // ============================================================
-// APPLY PERMISSION OVERWRITES
+// PERMISSION OVERWRITE RESTORE
 // ============================================================
 
 async function applyOverwrites(
@@ -685,78 +965,91 @@ async function applyOverwrites(
   overwrites,
   roleMap
 ) {
-  if (!Array.isArray(overwrites)) return;
+  if (
+    !Array.isArray(
+      overwrites
+    )
+  ) {
+    return;
+  }
 
   const permissions = [];
 
-  for (const overwrite of overwrites) {
-    let targetId;
+  for (
+    const overwrite of overwrites
+  ) {
 
-    if (overwrite.type === 0) {
-      // Role overwrite
-      targetId =
-        findMappedRoleId(
-          roleMap,
-          overwrite.id
-        );
-    } else {
-      // User overwrite
-      // User IDs usually don't exist in destination server.
-      // Skip them rather than accidentally assigning them.
+    // ========================================================
+    // ONLY COPY ROLE OVERWRITES
+    // ========================================================
+
+    if (
+      overwrite.type !== 0
+    ) {
+      // User-specific permissions
+      // cannot safely be copied to another server.
       continue;
     }
 
-    if (!targetId) continue;
+    // ========================================================
+    // MAP SOURCE ROLE -> DESTINATION ROLE
+    // ========================================================
+
+    const targetId =
+      roleMap[
+        overwrite.id
+      ];
+
+    if (!targetId) {
+      console.log(
+        `⚠️ Could not map role overwrite ${overwrite.id} on #${channel.name}`
+      );
+
+      continue;
+    }
 
     permissions.push({
-      id: targetId,
-      allow: BigInt(overwrite.allow),
-      deny: BigInt(overwrite.deny),
-      type: 0
+      id:
+        targetId,
+
+      type: 0,
+
+      allow:
+        BigInt(
+          overwrite.allow || "0"
+        ),
+
+      deny:
+        BigInt(
+          overwrite.deny || "0"
+        )
     });
   }
 
-  if (!permissions.length) return;
-
   try {
+    // ========================================================
+    // IMPORTANT:
+    // .set() REPLACES THE EXISTING OVERWRITES.
+    //
+    // That's what we WANT.
+    //
+    // It prevents the destination server from accidentally
+    // keeping @everyone access from its old configuration.
+    // ========================================================
+
     await channel.permissionOverwrites.set(
       permissions,
       "Zynko server template permissions"
     );
-  } catch (error) {
-    console.error(
-      `Permission restore failed for #${channel.name}:`,
-      error.message
+
+    console.log(
+      `🔒 Permissions restored: #${channel.name}`
     );
-  }
-}
 
-// ============================================================
-// DELETE OLD CHANNELS
-// ============================================================
-
-async function removeOldChannels(
-  guild,
-  snapshot
-) {
-  const wantedNames = new Set(
-    snapshot.channels.map(c => c.name)
-  );
-
-  const deletable = guild.channels.cache.filter(
-    channel =>
-      channel.id !== guild.rulesChannelId &&
-      channel.id !== guild.publicUpdatesChannelId &&
-      !channel.isThread() &&
-      !wantedNames.has(channel.name)
-  );
-
-  for (const channel of deletable.values()) {
-    try {
-      await channel.delete(
-        "Zynko template cleanup"
-      );
-    } catch {}
+  } catch (error) {
+    console.log(
+      `⚠️ Permission restore failed for #${channel.name}: ${error.message}`
+    );
   }
 }
 
@@ -769,10 +1062,11 @@ async function loadServerSnapshot(
   snapshot
 ) {
   console.log(
-    `📥 Loading template into ${guild.name}`
+    `📥 Loading "${snapshot.guild.name}" into "${guild.name}"`
   );
 
-  const me = guild.members.me;
+  const me =
+    guild.members.me;
 
   if (!me) {
     throw new Error(
@@ -800,9 +1094,9 @@ async function loadServerSnapshot(
     );
   }
 
-  // ----------------------------------------------------------
-  // ROLES FIRST
-  // ----------------------------------------------------------
+  // ==========================================================
+  // ROLES
+  // ==========================================================
 
   const roleMap =
     await restoreRoles(
@@ -810,9 +1104,9 @@ async function loadServerSnapshot(
       snapshot
     );
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // CATEGORIES
-  // ----------------------------------------------------------
+  // ==========================================================
 
   const channelMap =
     await restoreCategories(
@@ -821,9 +1115,9 @@ async function loadServerSnapshot(
       roleMap
     );
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // CHANNELS
-  // ----------------------------------------------------------
+  // ==========================================================
 
   await restoreChannels(
     guild,
@@ -842,215 +1136,419 @@ async function loadServerSnapshot(
 // HOME EMBED
 // ============================================================
 
-function homeEmbed(guild, user) {
-  const data = getGuildData(guild.id);
-  const db = loadDB();
+function homeEmbed(
+  guild,
+  user
+) {
+  const data =
+    getGuildData(
+      guild.id
+    );
+
+  const db =
+    loadDB();
 
   return new EmbedBuilder()
-    .setTitle("⚙️ Zynko Control Dashboard")
+    .setTitle(
+      "⚙️ Zynko Control Dashboard"
+    )
+
     .setDescription(
       "Your server control center.\n\n" +
       "Manage automation, moderation and universal server templates."
     )
+
     .addFields(
       {
-        name: "⚡ Automation",
+        name:
+          "⚡ Automation",
+
         value:
-          Object.values(data.automation).some(Boolean)
+          Object.values(
+            data.automation
+          ).some(Boolean)
             ? "🟢 Active"
             : "🔴 Disabled",
-        inline: true
+
+        inline:
+          true
       },
+
       {
-        name: "🛡️ Moderation",
+        name:
+          "🛡️ Moderation",
+
         value:
-          Object.values(data.moderation).some(Boolean)
+          Object.values(
+            data.moderation
+          ).some(Boolean)
             ? "🟢 Active"
             : "⚪ Basic",
-        inline: true
+
+        inline:
+          true
       },
+
       {
-        name: "🌎 Templates",
+        name:
+          "🌎 Templates",
+
         value:
-          `${Object.keys(db.templates).length} saved`,
-        inline: true
+          `${Object.keys(
+            db.templates
+          ).length} saved`,
+
+        inline:
+          true
       },
+
       {
-        name: "🧱 Embeds",
+        name:
+          "🧱 Embeds",
+
         value:
           `${data.embeds.length} saved`,
-        inline: true
+
+        inline:
+          true
       },
+
       {
-        name: "📜 Logs",
+        name:
+          "📜 Logs",
+
         value:
           channelMention(
             guild,
             data.channels.logs
           ),
-        inline: true
+
+        inline:
+          true
       },
+
       {
-        name: "👤 Auto Role",
+        name:
+          "👤 Auto Role",
+
         value:
           data.roles.autoRole
             ? `<@&${data.roles.autoRole}>`
             : "Not configured",
-        inline: true
+
+        inline:
+          true
       }
     )
+
     .setFooter({
       text:
         `Opened by ${user.username} • 10 minute session`
     })
+
     .setTimestamp();
 }
 
+// ============================================================
+// HOME BUTTONS
+// ============================================================
+
 function homeButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("home_automation")
-        .setLabel("Automation")
-        .setEmoji("⚡")
-        .setStyle(ButtonStyle.Primary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "home_automation"
+          )
+          .setLabel(
+            "Automation"
+          )
+          .setEmoji("⚡")
+          .setStyle(
+            ButtonStyle.Primary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("home_moderation")
-        .setLabel("Moderation")
-        .setEmoji("🛡️")
-        .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(
+            "home_moderation"
+          )
+          .setLabel(
+            "Moderation"
+          )
+          .setEmoji("🛡️")
+          .setStyle(
+            ButtonStyle.Danger
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("home_templates")
-        .setLabel("Templates")
-        .setEmoji("🌎")
-        .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(
+            "home_templates"
+          )
+          .setLabel(
+            "Templates"
+          )
+          .setEmoji("🌎")
+          .setStyle(
+            ButtonStyle.Success
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("home_settings")
-        .setLabel("Settings")
-        .setEmoji("⚙️")
-        .setStyle(ButtonStyle.Secondary)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "home_settings"
+          )
+          .setLabel(
+            "Settings"
+          )
+          .setEmoji("⚙️")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      ),
 
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("home_lookup")
-        .setLabel("Lookup")
-        .setEmoji("🔎")
-        .setStyle(ButtonStyle.Secondary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "home_lookup"
+          )
+          .setLabel(
+            "Lookup"
+          )
+          .setEmoji("🔎")
+          .setStyle(
+            ButtonStyle.Secondary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("home_embeds")
-        .setLabel("Embeds")
-        .setEmoji("🧱")
-        .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(
+            "home_embeds"
+          )
+          .setLabel(
+            "Embeds"
+          )
+          .setEmoji("🧱")
+          .setStyle(
+            ButtonStyle.Success
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("home_help")
-        .setLabel("Help")
-        .setEmoji("❓")
-        .setStyle(ButtonStyle.Secondary)
-    )
+        new ButtonBuilder()
+          .setCustomId(
+            "home_help"
+          )
+          .setLabel(
+            "Help"
+          )
+          .setEmoji("❓")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      )
   ];
 }
 
+// ============================================================
+// BACK BUTTON
+// ============================================================
+
 function backButton() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("go_home")
-      .setLabel("Back")
-      .setEmoji("↩️")
-      .setStyle(ButtonStyle.Secondary)
-  );
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          "go_home"
+        )
+        .setLabel(
+          "Back"
+        )
+        .setEmoji("↩️")
+        .setStyle(
+          ButtonStyle.Secondary
+        )
+    );
 }
 
 // ============================================================
 // AUTOMATION
 // ============================================================
 
-function automationEmbed(guild) {
-  const d = getGuildData(guild.id);
+function automationEmbed(
+  guild
+) {
+  const d =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
-    .setTitle("⚡ Automation")
-    .setDescription("Automatic server systems.")
+    .setTitle(
+      "⚡ Automation"
+    )
+
+    .setDescription(
+      "Automatic server systems."
+    )
+
     .addFields(
       {
-        name: "📜 Transcripts",
-        value: enabled(d.automation.transcripts),
-        inline: true
+        name:
+          "📜 Transcripts",
+
+        value:
+          enabled(
+            d.automation.transcripts
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "👋 Auto Joins",
-        value: enabled(d.automation.autoJoins),
-        inline: true
+        name:
+          "👋 Auto Joins",
+
+        value:
+          enabled(
+            d.automation.autoJoins
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "🚪 Auto Goodbyes",
-        value: enabled(d.automation.autoGoodbyes),
-        inline: true
+        name:
+          "🚪 Auto Goodbyes",
+
+        value:
+          enabled(
+            d.automation.autoGoodbyes
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "💬 Chat Logs",
-        value: enabled(d.automation.autoChatLogs),
-        inline: true
+        name:
+          "💬 Chat Logs",
+
+        value:
+          enabled(
+            d.automation.autoChatLogs
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "🧹 Delete Logs",
-        value: enabled(d.automation.autoDeleteLogs),
-        inline: true
+        name:
+          "🧹 Delete Logs",
+
+        value:
+          enabled(
+            d.automation.autoDeleteLogs
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "👤 Auto Roles",
-        value: enabled(d.automation.autoRoles),
-        inline: true
+        name:
+          "👤 Auto Roles",
+
+        value:
+          enabled(
+            d.automation.autoRoles
+          ),
+
+        inline:
+          true
       }
     );
 }
 
 function automationButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("auto_transcripts")
-        .setLabel("Transcripts")
-        .setEmoji("📜")
-        .setStyle(ButtonStyle.Primary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_transcripts"
+          )
+          .setLabel(
+            "Transcripts"
+          )
+          .setEmoji("📜")
+          .setStyle(
+            ButtonStyle.Primary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("auto_joins")
-        .setLabel("Joins")
-        .setEmoji("👋")
-        .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_joins"
+          )
+          .setLabel(
+            "Joins"
+          )
+          .setEmoji("👋")
+          .setStyle(
+            ButtonStyle.Success
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("auto_goodbyes")
-        .setLabel("Goodbyes")
-        .setEmoji("🚪")
-        .setStyle(ButtonStyle.Success)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_goodbyes"
+          )
+          .setLabel(
+            "Goodbyes"
+          )
+          .setEmoji("🚪")
+          .setStyle(
+            ButtonStyle.Success
+          )
+      ),
 
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("auto_chatlogs")
-        .setLabel("Chat Logs")
-        .setEmoji("💬")
-        .setStyle(ButtonStyle.Secondary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_chatlogs"
+          )
+          .setLabel(
+            "Chat Logs"
+          )
+          .setEmoji("💬")
+          .setStyle(
+            ButtonStyle.Secondary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("auto_delete")
-        .setLabel("Delete Logs")
-        .setEmoji("🧹")
-        .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_delete"
+          )
+          .setLabel(
+            "Delete Logs"
+          )
+          .setEmoji("🧹")
+          .setStyle(
+            ButtonStyle.Secondary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("auto_roles")
-        .setLabel("Auto Roles")
-        .setEmoji("👤")
-        .setStyle(ButtonStyle.Secondary)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "auto_roles"
+          )
+          .setLabel(
+            "Auto Roles"
+          )
+          .setEmoji("👤")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      ),
 
     backButton()
   ];
@@ -1060,70 +1558,149 @@ function automationButtons() {
 // MODERATION
 // ============================================================
 
-function moderationEmbed(guild) {
-  const d = getGuildData(guild.id);
+function moderationEmbed(
+  guild
+) {
+  const d =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
-    .setTitle("🛡️ Moderation")
+    .setTitle(
+      "🛡️ Moderation"
+    )
+
     .addFields(
       {
-        name: "⚠️ Warnings",
-        value: enabled(d.moderation.warnings),
-        inline: true
+        name:
+          "⚠️ Warnings",
+
+        value:
+          enabled(
+            d.moderation.warnings
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "🤖 AutoMod",
-        value: enabled(d.moderation.automod),
-        inline: true
+        name:
+          "🤖 AutoMod",
+
+        value:
+          enabled(
+            d.moderation.automod
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "💬 Anti Spam",
-        value: enabled(d.moderation.antiSpam),
-        inline: true
+        name:
+          "💬 Anti Spam",
+
+        value:
+          enabled(
+            d.moderation.antiSpam
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "🔗 Anti Links",
-        value: enabled(d.moderation.antiLinks),
-        inline: true
+        name:
+          "🔗 Anti Links",
+
+        value:
+          enabled(
+            d.moderation.antiLinks
+          ),
+
+        inline:
+          true
       },
+
       {
-        name: "📢 Anti Mentions",
-        value: enabled(d.moderation.antiMassMention),
-        inline: true
+        name:
+          "📢 Anti Mentions",
+
+        value:
+          enabled(
+            d.moderation.antiMassMention
+          ),
+
+        inline:
+          true
       }
     );
 }
 
 function moderationButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("mod_warnings")
-        .setLabel("Warnings")
-        .setStyle(ButtonStyle.Primary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "mod_warnings"
+          )
+          .setLabel(
+            "Warnings"
+          )
+          .setStyle(
+            ButtonStyle.Primary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("mod_automod")
-        .setLabel("AutoMod")
-        .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(
+            "mod_automod"
+          )
+          .setLabel(
+            "AutoMod"
+          )
+          .setStyle(
+            ButtonStyle.Danger
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("mod_spam")
-        .setLabel("Anti Spam")
-        .setStyle(ButtonStyle.Danger)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "mod_spam"
+          )
+          .setLabel(
+            "Anti Spam"
+          )
+          .setStyle(
+            ButtonStyle.Danger
+          )
+      ),
 
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("mod_links")
-        .setLabel("Anti Links")
-        .setStyle(ButtonStyle.Danger),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "mod_links"
+          )
+          .setLabel(
+            "Anti Links"
+          )
+          .setStyle(
+            ButtonStyle.Danger
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("mod_mentions")
-        .setLabel("Anti Mentions")
-        .setStyle(ButtonStyle.Danger)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "mod_mentions"
+          )
+          .setLabel(
+            "Anti Mentions"
+          )
+          .setStyle(
+            ButtonStyle.Danger
+          )
+      ),
 
     backButton()
   ];
@@ -1134,9 +1711,13 @@ function moderationButtons() {
 // ============================================================
 
 function templateEmbed() {
-  const db = loadDB();
+  const db =
+    loadDB();
+
   const templates =
-    Object.values(db.templates);
+    Object.values(
+      db.templates
+    );
 
   let description =
     "🌎 **Universal Server Templates**\n\n" +
@@ -1146,40 +1727,76 @@ function templateEmbed() {
     description +=
       "❌ No templates saved.";
   } else {
-    for (const template of templates.slice(0, 15)) {
+    for (
+      const template of
+        templates.slice(0, 15)
+    ) {
       description +=
         `**${template.name}**\n` +
-        `> ${template.snapshot?.roles?.length || 0} roles • ` +
-        `${template.snapshot?.channels?.length || 0} channels\n\n`;
+        `> ${
+          template.snapshot?.roles?.length ||
+          0
+        } roles • ` +
+        `${
+          template.snapshot?.channels?.length ||
+          0
+        } channels\n\n`;
     }
   }
 
   return new EmbedBuilder()
-    .setTitle("🌎 Universal Templates")
-    .setDescription(description);
+    .setTitle(
+      "🌎 Universal Templates"
+    )
+    .setDescription(
+      description
+    );
 }
+
+// ============================================================
+// TEMPLATE BUTTONS
+// ============================================================
 
 function templateButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("template_create")
-        .setLabel("Save Server")
-        .setEmoji("💾")
-        .setStyle(ButtonStyle.Success),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "template_create"
+          )
+          .setLabel(
+            "Save Server"
+          )
+          .setEmoji("💾")
+          .setStyle(
+            ButtonStyle.Success
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("template_use")
-        .setLabel("Load Server")
-        .setEmoji("📥")
-        .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(
+            "template_use"
+          )
+          .setLabel(
+            "Load Server"
+          )
+          .setEmoji("📥")
+          .setStyle(
+            ButtonStyle.Primary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("template_delete")
-        .setLabel("Delete")
-        .setEmoji("🗑️")
-        .setStyle(ButtonStyle.Danger)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "template_delete"
+          )
+          .setLabel(
+            "Delete"
+          )
+          .setEmoji("🗑️")
+          .setStyle(
+            ButtonStyle.Danger
+          )
+      ),
 
     backButton()
   ];
@@ -1189,40 +1806,64 @@ function templateButtons() {
 // SETTINGS
 // ============================================================
 
-function settingsEmbed(guild) {
-  const d = getGuildData(guild.id);
+function settingsEmbed(
+  guild
+) {
+  const d =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
-    .setTitle("⚙️ Settings")
+    .setTitle(
+      "⚙️ Settings"
+    )
+
     .addFields(
       {
-        name: "🤖 Bot Name",
+        name:
+          "🤖 Bot Name",
+
         value:
           d.settings.botName ||
           client.user.username,
-        inline: true
+
+        inline:
+          true
       },
+
       {
-        name: "📜 Logs",
+        name:
+          "📜 Logs",
+
         value:
           channelMention(
             guild,
             d.channels.logs
           ),
-        inline: true
+
+        inline:
+          true
       }
     );
 }
 
 function settingsButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("setting_botname")
-        .setLabel("Bot Name")
-        .setEmoji("🤖")
-        .setStyle(ButtonStyle.Primary)
-    ),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "setting_botname"
+          )
+          .setLabel(
+            "Bot Name"
+          )
+          .setEmoji("🤖")
+          .setStyle(
+            ButtonStyle.Primary
+          )
+      ),
 
     backButton()
   ];
@@ -1232,11 +1873,18 @@ function settingsButtons() {
 // EMBEDS
 // ============================================================
 
-function embedsEmbed(guild) {
-  const d = getGuildData(guild.id);
+function embedsEmbed(
+  guild
+) {
+  const d =
+    getGuildData(
+      guild.id
+    );
 
   return new EmbedBuilder()
-    .setTitle("🧱 Embed Builder")
+    .setTitle(
+      "🧱 Embed Builder"
+    )
     .setDescription(
       `Saved embeds: **${d.embeds.length}**`
     );
@@ -1244,19 +1892,32 @@ function embedsEmbed(guild) {
 
 function embedsButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("embed_create")
-        .setLabel("Create")
-        .setEmoji("➕")
-        .setStyle(ButtonStyle.Success),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "embed_create"
+          )
+          .setLabel(
+            "Create"
+          )
+          .setEmoji("➕")
+          .setStyle(
+            ButtonStyle.Success
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("embed_saved")
-        .setLabel("Saved")
-        .emoji("📋")
-        .setStyle(ButtonStyle.Secondary)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "embed_saved"
+          )
+          .setLabel(
+            "Saved"
+          )
+          .setEmoji("📋")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      ),
 
     backButton()
   ];
@@ -1268,7 +1929,9 @@ function embedsButtons() {
 
 function lookupEmbed() {
   return new EmbedBuilder()
-    .setTitle("🔎 Lookup")
+    .setTitle(
+      "🔎 Lookup"
+    )
     .setDescription(
       "Search members and recent messages."
     );
@@ -1276,19 +1939,32 @@ function lookupEmbed() {
 
 function lookupButtons() {
   return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("lookup_user")
-        .setLabel("User Search")
-        .setEmoji("👤")
-        .setStyle(ButtonStyle.Primary),
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            "lookup_user"
+          )
+          .setLabel(
+            "User Search"
+          )
+          .setEmoji("👤")
+          .setStyle(
+            ButtonStyle.Primary
+          ),
 
-      new ButtonBuilder()
-        .setCustomId("lookup_messages")
-        .setLabel("Message Search")
-        .setEmoji("💬")
-        .setStyle(ButtonStyle.Secondary)
-    ),
+        new ButtonBuilder()
+          .setCustomId(
+            "lookup_messages"
+          )
+          .setLabel(
+            "Message Search"
+          )
+          .setEmoji("💬")
+          .setStyle(
+            ButtonStyle.Secondary
+          )
+      ),
 
     backButton()
   ];
@@ -1300,18 +1976,20 @@ function lookupButtons() {
 
 function helpEmbed() {
   return new EmbedBuilder()
-    .setTitle("❓ Help")
+    .setTitle(
+      "❓ Help"
+    )
     .setDescription(
       "**/dashboard**\n" +
       "Open the control panel.\n\n" +
 
       "**/save <name>**\n" +
-      "Save the current server structure as a universal template.\n\n" +
+      "Save the current server structure.\n\n" +
 
       "**/load <name>**\n" +
-      "Rebuild the saved structure in the current server.\n\n" +
+      "Load the saved structure into another server.\n\n" +
 
-      "**The template copies:**\n" +
+      "**Templates copy:**\n" +
       "• Roles\n" +
       "• Role permissions\n" +
       "• Role hierarchy\n" +
@@ -1320,9 +1998,14 @@ function helpEmbed() {
       "• Channel positions\n" +
       "• Topics\n" +
       "• Slowmode\n" +
-      "• NSFW settings\n" +
-      "• Channel permission overwrites\n" +
-      "• Role-only / admin-only channel access"
+      "• NSFW\n" +
+      "• Permission overwrites\n" +
+      "• Role-only channels\n" +
+      "• Admin-only channels\n\n" +
+
+      "**Skipped:**\n" +
+      "• Invite Tracker role\n" +
+      "• Individual user permission overwrites"
     );
 }
 
@@ -1330,17 +2013,27 @@ function helpEmbed() {
 // MODAL
 // ============================================================
 
-function makeModal(id, title, fields) {
+function makeModal(
+  id,
+  title,
+  fields
+) {
   const modal =
     new ModalBuilder()
       .setCustomId(id)
       .setTitle(title);
 
-  for (const field of fields) {
+  for (
+    const field of fields
+  ) {
     const input =
       new TextInputBuilder()
-        .setCustomId(field.id)
-        .setLabel(field.label)
+        .setCustomId(
+          field.id
+        )
+        .setLabel(
+          field.label
+        )
         .setStyle(
           field.style ||
           TextInputStyle.Short
@@ -1349,13 +2042,17 @@ function makeModal(id, title, fields) {
           field.required !== false
         );
 
-    if (field.placeholder) {
+    if (
+      field.placeholder
+    ) {
       input.setPlaceholder(
         field.placeholder
       );
     }
 
-    if (field.maxLength) {
+    if (
+      field.maxLength
+    ) {
       input.setMaxLength(
         field.maxLength
       );
@@ -1371,14 +2068,15 @@ function makeModal(id, title, fields) {
 }
 
 // ============================================================
-// /DASHBOARD
+// DASHBOARD
 // ============================================================
 
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isChatInputCommand())
-      return;
+    if (
+      !interaction.isChatInputCommand()
+    ) return;
 
     if (
       interaction.commandName !==
@@ -1386,7 +2084,9 @@ client.on(
     ) return;
 
     if (
-      !(await requireAccess(interaction))
+      !(await requireAccess(
+        interaction
+      ))
     ) return;
 
     const message =
@@ -1397,8 +2097,12 @@ client.on(
             interaction.user
           )
         ],
-        components: homeButtons(),
-        fetchReply: true
+
+        components:
+          homeButtons(),
+
+        fetchReply:
+          true
       });
 
     createSession(
@@ -1415,8 +2119,9 @@ client.on(
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isChatInputCommand())
-      return;
+    if (
+      !interaction.isChatInputCommand()
+    ) return;
 
     if (
       interaction.commandName !==
@@ -1424,7 +2129,9 @@ client.on(
     ) return;
 
     if (
-      !(await requireAccess(interaction))
+      !(await requireAccess(
+        interaction
+      ))
     ) return;
 
     const name =
@@ -1433,7 +2140,8 @@ client.on(
       );
 
     await interaction.deferReply({
-      ephemeral: true
+      ephemeral:
+        true
     });
 
     try {
@@ -1442,13 +2150,16 @@ client.on(
           interaction.guild
         );
 
-      const db = loadDB();
+      const db =
+        loadDB();
 
       db.templates[
         name.toLowerCase()
       ] = {
         name,
-        created: Date.now(),
+
+        created:
+          Date.now(),
 
         ownerId:
           interaction.user.id,
@@ -1470,7 +2181,8 @@ client.on(
       saveDB(db);
 
       await interaction.editReply(
-        `✅ **${name}** saved.\n\n` +
+        `✅ **${name}** saved!\n\n` +
+        `🎭 Roles: **${snapshot.roles.length}**\n` +
         `📁 Categories: **${
           snapshot.channels.filter(
             c =>
@@ -1478,7 +2190,6 @@ client.on(
               ChannelType.GuildCategory
           ).length
         }**\n` +
-
         `💬 Channels: **${
           snapshot.channels.filter(
             c =>
@@ -1486,15 +2197,14 @@ client.on(
               ChannelType.GuildCategory
           ).length
         }**\n` +
-
-        `🎭 Roles: **${
-          snapshot.roles.length
-        }**\n\n` +
-
-        `🔒 Channel permissions were included.`
+        `🔒 Permission overwrites included.\n` +
+        `⏭️ Invite Tracker skipped.`
       );
     } catch (error) {
-      console.error(error);
+      console.error(
+        "SAVE ERROR:",
+        error
+      );
 
       await interaction.editReply(
         `❌ Save failed:\n\`${error.message}\``
@@ -1510,8 +2220,9 @@ client.on(
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isChatInputCommand())
-      return;
+    if (
+      !interaction.isChatInputCommand()
+    ) return;
 
     if (
       interaction.commandName !==
@@ -1519,7 +2230,9 @@ client.on(
     ) return;
 
     if (
-      !(await requireAccess(interaction))
+      !(await requireAccess(
+        interaction
+      ))
     ) return;
 
     const name =
@@ -1528,10 +2241,12 @@ client.on(
       );
 
     await interaction.deferReply({
-      ephemeral: true
+      ephemeral:
+        true
     });
 
-    const db = loadDB();
+    const db =
+      loadDB();
 
     const template =
       db.templates[
@@ -1539,48 +2254,48 @@ client.on(
       ];
 
     if (!template) {
-      const names =
-        Object.values(db.templates)
-          .slice(0, 20)
-          .map(
-            t => `• ${t.name}`
-          )
-          .join("\n");
-
       return interaction.editReply(
-        `❌ Template **${name}** doesn't exist.\n\n` +
-        `Available:\n${
-          names || "None"
-        }`
+        `❌ Template **${name}** doesn't exist.`
       );
     }
 
-    if (!template.snapshot) {
+    if (
+      !template.snapshot
+    ) {
       return interaction.editReply(
-        "❌ This is an old template and does not contain a full server snapshot.\n\n" +
-        "Run `/save` again on the original server."
+        "❌ This template is outdated. Run `/save` again."
       );
     }
 
     try {
       await interaction.editReply(
         `⏳ Loading **${template.name}**...\n\n` +
-        `This can take a little bit because I'm rebuilding roles, categories, channels and permissions.`
+        `🎭 Restoring roles...\n` +
+        `📁 Restoring categories...\n` +
+        `💬 Restoring channels...\n` +
+        `🔒 Restoring permissions...`
       );
 
-      await loadServerSnapshot(
-        interaction.guild,
-        template.snapshot
-      );
+      const result =
+        await loadServerSnapshot(
+          interaction.guild,
+          template.snapshot
+        );
 
       await interaction.editReply(
-        `✅ **${template.name}** loaded into **${interaction.guild.name}**.\n\n` +
-        `🎭 Roles restored\n` +
+        `✅ **${template.name}** loaded!\n\n` +
+        `🎭 Roles restored: **${
+          Object.keys(
+            result.roleMap
+          ).length - 1
+        }**\n` +
         `📁 Categories restored\n` +
         `💬 Channels restored\n` +
         `📐 Layout restored\n` +
-        `🔒 Channel permissions restored`
+        `🔒 Role permissions restored\n\n` +
+        `Admin-only and role-only channels should now match the original server.`
       );
+
     } catch (error) {
       console.error(
         "LOAD ERROR:",
@@ -1588,9 +2303,9 @@ client.on(
       );
 
       await interaction.editReply(
-        `⚠️ Template partially loaded.\n\n` +
-        `Error: \`${error.message}\`\n\n` +
-        `Check that Zynko has **Administrator** or at least **Manage Roles + Manage Channels**.`
+        `⚠️ Load partially failed:\n\n` +
+        `\`${error.message}\`\n\n` +
+        `Make sure Zynko has Administrator or Manage Roles + Manage Channels.`
       );
     }
   }
@@ -1603,18 +2318,26 @@ client.on(
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isButton())
-      return;
-
     if (
-      !(await requireAccess(interaction))
+      !interaction.isButton()
     ) return;
 
-    if (!validSession(interaction)) {
+    if (
+      !(await requireAccess(
+        interaction
+      ))
+    ) return;
+
+    if (
+      !validSession(
+        interaction
+      )
+    ) {
       return interaction.reply({
         content:
           "⏱️ Dashboard expired. Run `/dashboard` again.",
-        ephemeral: true
+        ephemeral:
+          true
       });
     }
 
@@ -1625,11 +2348,18 @@ client.on(
       interaction.guild;
 
     const data =
-      getGuildData(guild.id);
+      getGuildData(
+        guild.id
+      );
 
+    // ========================================================
     // HOME
+    // ========================================================
 
-    if (id === "go_home") {
+    if (
+      id ===
+      "go_home"
+    ) {
       return interaction.update({
         embeds: [
           homeEmbed(
@@ -1637,83 +2367,122 @@ client.on(
             interaction.user
           )
         ],
+
         components:
           homeButtons()
       });
     }
 
-    if (id === "home_automation") {
+    if (
+      id ===
+      "home_automation"
+    ) {
       return interaction.update({
         embeds: [
-          automationEmbed(guild)
+          automationEmbed(
+            guild
+          )
         ],
+
         components:
           automationButtons()
       });
     }
 
-    if (id === "home_moderation") {
+    if (
+      id ===
+      "home_moderation"
+    ) {
       return interaction.update({
         embeds: [
-          moderationEmbed(guild)
+          moderationEmbed(
+            guild
+          )
         ],
+
         components:
           moderationButtons()
       });
     }
 
-    if (id === "home_templates") {
+    if (
+      id ===
+      "home_templates"
+    ) {
       return interaction.update({
         embeds: [
           templateEmbed()
         ],
+
         components:
           templateButtons()
       });
     }
 
-    if (id === "home_settings") {
+    if (
+      id ===
+      "home_settings"
+    ) {
       return interaction.update({
         embeds: [
-          settingsEmbed(guild)
+          settingsEmbed(
+            guild
+          )
         ],
+
         components:
           settingsButtons()
       });
     }
 
-    if (id === "home_embeds") {
+    if (
+      id ===
+      "home_embeds"
+    ) {
       return interaction.update({
         embeds: [
-          embedsEmbed(guild)
+          embedsEmbed(
+            guild
+          )
         ],
+
         components:
           embedsButtons()
       });
     }
 
-    if (id === "home_lookup") {
+    if (
+      id ===
+      "home_lookup"
+    ) {
       return interaction.update({
         embeds: [
           lookupEmbed()
         ],
+
         components:
           lookupButtons()
       });
     }
 
-    if (id === "home_help") {
+    if (
+      id ===
+      "home_help"
+    ) {
       return interaction.update({
         embeds: [
           helpEmbed()
         ],
+
         components: [
           backButton()
         ]
       });
     }
 
+    // ========================================================
     // AUTOMATION
+    // ========================================================
 
     const automationMap = {
       auto_transcripts:
@@ -1735,7 +2504,9 @@ client.on(
         "autoRoles"
     };
 
-    if (automationMap[id]) {
+    if (
+      automationMap[id]
+    ) {
       const key =
         automationMap[id];
 
@@ -1749,14 +2520,19 @@ client.on(
 
       return interaction.update({
         embeds: [
-          automationEmbed(guild)
+          automationEmbed(
+            guild
+          )
         ],
+
         components:
           automationButtons()
       });
     }
 
+    // ========================================================
     // MODERATION
+    // ========================================================
 
     const moderationMap = {
       mod_warnings:
@@ -1775,7 +2551,9 @@ client.on(
         "antiMassMention"
     };
 
-    if (moderationMap[id]) {
+    if (
+      moderationMap[id]
+    ) {
       const key =
         moderationMap[id];
 
@@ -1789,14 +2567,19 @@ client.on(
 
       return interaction.update({
         embeds: [
-          moderationEmbed(guild)
+          moderationEmbed(
+            guild
+          )
         ],
+
         components:
           moderationButtons()
       });
     }
 
+    // ========================================================
     // TEMPLATE CREATE
+    // ========================================================
 
     if (
       id ===
@@ -1808,19 +2591,23 @@ client.on(
           "Save Server Template",
           [
             {
-              id: "name",
+              id:
+                "name",
+
               label:
                 "Template Name",
-              maxLength: 100,
-              placeholder:
-                "Example: Main Server"
+
+              maxLength:
+                100
             }
           ]
         )
       );
     }
 
+    // ========================================================
     // TEMPLATE USE
+    // ========================================================
 
     if (
       id ===
@@ -1838,7 +2625,9 @@ client.on(
         return interaction.reply({
           content:
             "❌ No templates saved.",
-          ephemeral: true
+
+          ephemeral:
+            true
         });
       }
 
@@ -1853,33 +2642,44 @@ client.on(
 
       templates
         .slice(0, 25)
-        .forEach(template => {
-          menu.addOptions({
-            label:
-              template.name.slice(
-                0,
-                100
-              ),
+        .forEach(
+          template => {
+            menu.addOptions({
+              label:
+                template.name.slice(
+                  0,
+                  100
+                ),
 
-            value:
-              template.name.toLowerCase(),
+              value:
+                template.name
+                  .toLowerCase(),
 
-            emoji: "📥"
-          });
-        });
+              emoji:
+                "📥"
+            });
+          }
+        );
 
       return interaction.reply({
         content:
           "🌎 Choose the server template to load.",
+
         components: [
           new ActionRowBuilder()
-            .addComponents(menu)
+            .addComponents(
+              menu
+            )
         ],
-        ephemeral: true
+
+        ephemeral:
+          true
       });
     }
 
-    // TEMPLATE DELETE
+    // ========================================================
+    // DELETE TEMPLATE
+    // ========================================================
 
     if (
       id ===
@@ -1897,7 +2697,9 @@ client.on(
         return interaction.reply({
           content:
             "❌ No templates.",
-          ephemeral: true
+
+          ephemeral:
+            true
         });
       }
 
@@ -1912,33 +2714,44 @@ client.on(
 
       templates
         .slice(0, 25)
-        .forEach(template => {
-          menu.addOptions({
-            label:
-              template.name.slice(
-                0,
-                100
-              ),
+        .forEach(
+          template => {
+            menu.addOptions({
+              label:
+                template.name.slice(
+                  0,
+                  100
+                ),
 
-            value:
-              template.name.toLowerCase(),
+              value:
+                template.name
+                  .toLowerCase(),
 
-            emoji: "🗑️"
-          });
-        });
+              emoji:
+                "🗑️"
+            });
+          }
+        );
 
       return interaction.reply({
         content:
           "🗑️ Choose a template to delete.",
+
         components: [
           new ActionRowBuilder()
-            .addComponents(menu)
+            .addComponents(
+              menu
+            )
         ],
-        ephemeral: true
+
+        ephemeral:
+          true
       });
     }
 
+    // ========================================================
     // BOT NAME
+    // ========================================================
 
     if (
       id ===
@@ -1950,17 +2763,23 @@ client.on(
           "Bot Name",
           [
             {
-              id: "botname",
+              id:
+                "botname",
+
               label:
                 "Bot Nickname",
-              maxLength: 32
+
+              maxLength:
+                32
             }
           ]
         )
       );
     }
 
+    // ========================================================
     // EMBED CREATE
+    // ========================================================
 
     if (
       id ===
@@ -1972,35 +2791,51 @@ client.on(
           "Create Embed",
           [
             {
-              id: "title",
-              label: "Title",
-              maxLength: 256
+              id:
+                "title",
+
+              label:
+                "Title",
+
+              maxLength:
+                256
             },
 
             {
-              id: "description",
+              id:
+                "description",
+
               label:
                 "Description",
+
               style:
                 TextInputStyle.Paragraph,
-              maxLength: 4000
+
+              maxLength:
+                4000
             }
           ]
         )
       );
     }
 
+    // ========================================================
     // EMBED SAVED
+    // ========================================================
 
     if (
       id ===
       "embed_saved"
     ) {
-      if (!data.embeds.length) {
+      if (
+        !data.embeds.length
+      ) {
         return interaction.reply({
           content:
             "🧱 No saved embeds.",
-          ephemeral: true
+
+          ephemeral:
+            true
         });
       }
 
@@ -2013,11 +2848,15 @@ client.on(
                 `${i + 1}. **${e.title}**`
             )
             .join("\n"),
-        ephemeral: true
+
+        ephemeral:
+          true
       });
     }
 
-    // LOOKUP USER
+    // ========================================================
+    // USER LOOKUP
+    // ========================================================
 
     if (
       id ===
@@ -2029,7 +2868,9 @@ client.on(
           "User Lookup",
           [
             {
-              id: "userid",
+              id:
+                "userid",
+
               label:
                 "Discord User ID"
             }
@@ -2038,7 +2879,9 @@ client.on(
       );
     }
 
-    // LOOKUP MESSAGE
+    // ========================================================
+    // MESSAGE LOOKUP
+    // ========================================================
 
     if (
       id ===
@@ -2050,10 +2893,14 @@ client.on(
           "Message Search",
           [
             {
-              id: "query",
+              id:
+                "query",
+
               label:
                 "Search Phrase",
-              maxLength: 100
+
+              maxLength:
+                100
             }
           ]
         )
@@ -2074,10 +2921,14 @@ client.on(
     ) return;
 
     if (
-      !(await requireAccess(interaction))
+      !(await requireAccess(
+        interaction
+      ))
     ) return;
 
-    // LOAD TEMPLATE
+    // ========================================================
+    // LOAD
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2097,14 +2948,18 @@ client.on(
         return interaction.update({
           content:
             "❌ Template no longer exists.",
+
           components: []
         });
       }
 
-      if (!template.snapshot) {
+      if (
+        !template.snapshot
+      ) {
         return interaction.update({
           content:
-            "❌ This template was created with an older version of Zynko.\n\nUse `/save` again on the original server.",
+            "❌ This template is outdated. Run `/save` again.",
+
           components: []
         });
       }
@@ -2112,6 +2967,7 @@ client.on(
       await interaction.update({
         content:
           `⏳ Loading **${template.name}**...`,
+
         components: []
       });
 
@@ -2130,7 +2986,13 @@ client.on(
             `📐 Layout copied\n` +
             `🔒 Permissions copied`
         });
+
       } catch (error) {
+        console.error(
+          "SELECT LOAD ERROR:",
+          error
+        );
+
         await interaction.editReply({
           content:
             `❌ Load failed:\n\`${error.message}\``
@@ -2140,7 +3002,9 @@ client.on(
       return;
     }
 
-    // DELETE TEMPLATE
+    // ========================================================
+    // DELETE
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2160,6 +3024,7 @@ client.on(
         return interaction.update({
           content:
             "❌ Template no longer exists.",
+
           components: []
         });
       }
@@ -2171,6 +3036,7 @@ client.on(
       return interaction.update({
         content:
           `🗑️ Deleted **${template.name}**.`,
+
         components: []
       });
     }
@@ -2189,10 +3055,14 @@ client.on(
     ) return;
 
     if (
-      !(await requireAccess(interaction))
+      !(await requireAccess(
+        interaction
+      ))
     ) return;
 
-    // SAVE SERVER
+    // ========================================================
+    // SAVE TEMPLATE
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2205,7 +3075,8 @@ client.on(
           );
 
       await interaction.deferReply({
-        ephemeral: true
+        ephemeral:
+          true
       });
 
       try {
@@ -2261,11 +3132,15 @@ client.on(
                 ChannelType.GuildCategory
             ).length
           } channels\n` +
-          `🔒 Permission overwrites included.\n\n` +
-          `You can now use \`/load ${name}\` in another server.`
+          `🔒 Permission overwrites included.\n` +
+          `⏭️ Invite Tracker skipped.`
         );
+
       } catch (error) {
-        console.error(error);
+        console.error(
+          "MODAL SAVE ERROR:",
+          error
+        );
 
         return interaction.editReply(
           `❌ Save failed:\n\`${error.message}\``
@@ -2273,7 +3148,9 @@ client.on(
       }
     }
 
+    // ========================================================
     // BOT NAME
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2300,17 +3177,23 @@ client.on(
 
       try {
         await interaction.guild.members.me
-          .setNickname(name);
+          .setNickname(
+            name
+          );
       } catch {}
 
       return interaction.reply({
         content:
           `✅ Bot nickname changed to **${name}**.`,
-        ephemeral: true
+
+        ephemeral:
+          true
       });
     }
 
+    // ========================================================
     // EMBED
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2335,7 +3218,9 @@ client.on(
 
       data.embeds.push({
         title,
+
         description,
+
         created:
           Date.now()
       });
@@ -2348,18 +3233,25 @@ client.on(
       return interaction.reply({
         content:
           "✅ Embed saved.",
+
         embeds: [
           new EmbedBuilder()
-            .setTitle(title)
+            .setTitle(
+              title
+            )
             .setDescription(
               description
             )
         ],
-        ephemeral: true
+
+        ephemeral:
+          true
       });
     }
 
+    // ========================================================
     // USER LOOKUP
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2378,11 +3270,14 @@ client.on(
           await interaction.guild
             .members
             .fetch(id);
+
       } catch {
         return interaction.reply({
           content:
             "❌ Member not found.",
-          ephemeral: true
+
+          ephemeral:
+            true
         });
       }
 
@@ -2397,7 +3292,10 @@ client.on(
             role =>
               `<@&${role.id}>`
           )
-          .slice(0, 20)
+          .slice(
+            0,
+            20
+          )
           .join(", ") ||
         "None";
 
@@ -2406,24 +3304,32 @@ client.on(
           .setTitle(
             "🔎 User Lookup"
           )
+
           .setThumbnail(
             member.user.displayAvatarURL()
           )
+
           .addFields(
             {
-              name: "User",
+              name:
+                "User",
+
               value:
                 `${member.user.tag}\n\`${member.id}\``
             },
 
             {
-              name: "Roles",
+              name:
+                "Roles",
+
               value:
                 roles
             },
 
             {
-              name: "Joined",
+              name:
+                "Joined",
+
               value:
                 member.joinedTimestamp
                   ? `<t:${Math.floor(
@@ -2435,12 +3341,18 @@ client.on(
           );
 
       return interaction.reply({
-        embeds: [embed],
-        ephemeral: true
+        embeds: [
+          embed
+        ],
+
+        ephemeral:
+          true
       });
     }
 
+    // ========================================================
     // MESSAGE LOOKUP
+    // ========================================================
 
     if (
       interaction.customId ===
@@ -2454,7 +3366,8 @@ client.on(
           .toLowerCase();
 
       await interaction.deferReply({
-        ephemeral: true
+        ephemeral:
+          true
       });
 
       const results = [];
@@ -2469,20 +3382,26 @@ client.on(
           );
 
       for (
-        const channel of channels.values()
+        const channel of
+          channels.values()
       ) {
         if (
-          results.length >= 20
-        ) break;
+          results.length >=
+          20
+        ) {
+          break;
+        }
 
         try {
           const messages =
             await channel.messages.fetch({
-              limit: 100
+              limit:
+                100
             });
 
           for (
-            const message of messages.values()
+            const message of
+              messages.values()
           ) {
             if (
               !message.content
@@ -2492,7 +3411,9 @@ client.on(
               !message.content
                 .toLowerCase()
                 .includes(query)
-            ) continue;
+            ) {
+              continue;
+            }
 
             results.push(
               `• ${message.author} in ${channel}\n` +
@@ -2504,8 +3425,11 @@ client.on(
             );
 
             if (
-              results.length >= 20
-            ) break;
+              results.length >=
+              20
+            ) {
+              break;
+            }
           }
         } catch {}
       }
@@ -2523,7 +3447,7 @@ client.on(
 );
 
 // ============================================================
-// MESSAGE LOGGING / MODERATION
+// MESSAGE LOGGING
 // ============================================================
 
 client.on(
@@ -2532,7 +3456,9 @@ client.on(
     if (
       !message.guild ||
       message.author.bot
-    ) return;
+    ) {
+      return;
+    }
 
     const data =
       getGuildData(
@@ -2569,11 +3495,12 @@ client.on(
         message.channel.id
       ].slice(-200);
 
+    // ========================================================
     // CHAT LOGS
+    // ========================================================
 
     if (
-      data.automation
-        .autoChatLogs &&
+      data.automation.autoChatLogs &&
       data.channels.logs
     ) {
       const channel =
@@ -2588,43 +3515,57 @@ client.on(
               .setTitle(
                 "💬 Message Log"
               )
+
               .addFields(
                 {
-                  name: "User",
+                  name:
+                    "User",
+
                   value:
                     `${message.author}`,
-                  inline: true
+
+                  inline:
+                    true
                 },
 
                 {
-                  name: "Channel",
+                  name:
+                    "Channel",
+
                   value:
                     `${message.channel}`,
-                  inline: true
+
+                  inline:
+                    true
                 },
 
                 {
-                  name: "Message",
+                  name:
+                    "Message",
+
                   value:
-                    message.content
-                      .slice(
-                        0,
-                        1000
-                      ) ||
+                    message.content.slice(
+                      0,
+                      1000
+                    ) ||
                     "[No text]"
                 }
               )
+
               .setTimestamp()
           ]
-        }).catch(() => {});
+        }).catch(
+          () => {}
+        );
       }
     }
 
+    // ========================================================
     // ANTI SPAM
+    // ========================================================
 
     if (
-      data.moderation
-        .antiSpam
+      data.moderation.antiSpam
     ) {
       const recent =
         data.messageLog[
@@ -2650,21 +3591,23 @@ client.on(
             30000,
             "Zynko anti-spam"
           )
-          .catch(() => {});
+          .catch(
+            () => {}
+          );
       }
     }
 
+    // ========================================================
     // ANTI LINKS
+    // ========================================================
 
     if (
-      data.moderation
-        .antiLinks
+      data.moderation.antiLinks
     ) {
       const hasLink =
-        /(https?:\/\/|www\.)/i
-          .test(
-            message.content
-          );
+        /(https?:\/\/|www\.)/i.test(
+          message.content
+        );
 
       const allowed =
         message.member?.permissions.has(
@@ -2676,21 +3619,28 @@ client.on(
         !allowed
       ) {
         await message.delete()
-          .catch(() => {});
+          .catch(
+            () => {}
+          );
 
         return;
       }
     }
 
+    // ========================================================
     // ANTI MASS MENTION
+    // ========================================================
 
     if (
       data.moderation
         .antiMassMention &&
-      message.mentions.users.size >= 5
+      message.mentions.users.size >=
+        5
     ) {
       await message.delete()
-        .catch(() => {});
+        .catch(
+          () => {}
+        );
 
       return;
     }
@@ -2721,7 +3671,9 @@ client.on(
       !data.automation
         .autoDeleteLogs ||
       !data.channels.logs
-    ) return;
+    ) {
+      return;
+    }
 
     const channel =
       message.guild.channels.cache.get(
@@ -2737,9 +3689,12 @@ client.on(
           .setTitle(
             "🗑️ Deleted Message"
           )
+
           .addFields(
             {
-              name: "Author",
+              name:
+                "Author",
+
               value:
                 message.author
                   ? `${message.author}`
@@ -2747,13 +3702,17 @@ client.on(
             },
 
             {
-              name: "Channel",
+              name:
+                "Channel",
+
               value:
                 `${message.channel}`
             },
 
             {
-              name: "Content",
+              name:
+                "Content",
+
               value:
                 message.content?.slice(
                   0,
@@ -2762,9 +3721,12 @@ client.on(
                 "[Content unavailable]"
             }
           )
+
           .setTimestamp()
       ]
-    }).catch(() => {});
+    }).catch(
+      () => {}
+    );
   }
 );
 
@@ -2781,8 +3743,7 @@ client.on(
       );
 
     if (
-      data.automation
-        .autoJoins &&
+      data.automation.autoJoins &&
       data.channels.welcome
     ) {
       const channel =
@@ -2793,13 +3754,14 @@ client.on(
       if (channel) {
         await channel.send(
           `👋 Welcome ${member} to **${member.guild.name}**!`
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
       }
     }
 
     if (
-      data.automation
-        .autoRoles &&
+      data.automation.autoRoles &&
       data.roles.autoRole
     ) {
       const role =
@@ -2819,7 +3781,9 @@ client.on(
         await member.roles.add(
           role,
           "Zynko automatic role"
-        ).catch(() => {});
+        ).catch(
+          () => {}
+        );
       }
     }
   }
@@ -2838,10 +3802,11 @@ client.on(
       );
 
     if (
-      !data.automation
-        .autoGoodbyes ||
+      !data.automation.autoGoodbyes ||
       !data.channels.goodbye
-    ) return;
+    ) {
+      return;
+    }
 
     const channel =
       member.guild.channels.cache.get(
@@ -2853,7 +3818,9 @@ client.on(
 
     await channel.send(
       `🚪 **${member.user.username}** has left the server.`
-    ).catch(() => {});
+    ).catch(
+      () => {}
+    );
   }
 );
 
@@ -2863,48 +3830,61 @@ client.on(
 
 async function registerCommands() {
   const commands = [
-
     new SlashCommandBuilder()
-      .setName("dashboard")
+      .setName(
+        "dashboard"
+      )
       .setDescription(
         "Open the Zynko Control Dashboard"
       ),
 
     new SlashCommandBuilder()
-      .setName("save")
+      .setName(
+        "save"
+      )
       .setDescription(
-        "Save the entire server layout as a universal template"
+        "Save the entire server layout"
       )
       .addStringOption(
         option =>
           option
-            .setName("name")
+            .setName(
+              "name"
+            )
             .setDescription(
               "Template name"
             )
-            .setRequired(true)
+            .setRequired(
+              true
+            )
       ),
 
     new SlashCommandBuilder()
-      .setName("load")
+      .setName(
+        "load"
+      )
       .setDescription(
-        "Load a full server template"
+        "Load a server template"
       )
       .addStringOption(
         option =>
           option
-            .setName("name")
+            .setName(
+              "name"
+            )
             .setDescription(
               "Template name"
             )
-            .setRequired(true)
+            .setRequired(
+              true
+            )
       )
-
   ];
 
   const rest =
     new REST({
-      version: "10"
+      version:
+        "10"
     }).setToken(
       TOKEN
     );
@@ -2926,6 +3906,7 @@ async function registerCommands() {
     console.log(
       "✅ Slash commands registered."
     );
+
   } catch (error) {
     console.error(
       "❌ Command registration failed:",
@@ -3011,4 +3992,6 @@ process.on(
 // LOGIN
 // ============================================================
 
-client.login(TOKEN);
+client.login(
+  TOKEN
+);
