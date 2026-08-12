@@ -1,6 +1,7 @@
 // ============================================================
 // ZYNKO CONTROL BOT
 // FULL UNIVERSAL DASHBOARD
+// ROLE-ID ONLY ACCESS
 // ============================================================
 
 const {
@@ -32,18 +33,30 @@ const fs = require("fs");
 const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || 3000;
 
-const DB_FILE = "./database.json";
-
 // ============================================================
 // IMPORTANT
 // ============================================================
 
-// PUT YOUR DISCORD USER ID HERE
-const OWNER_USER_ID = "PUT_YOUR_DISCORD_USER_ID_HERE";
+// PUT THE REAL DISCORD ID OF YOUR ZYNKO ROLE HERE.
+//
+// This MUST be the actual ROLE ID.
+// The role name does NOT matter.
+//
+// Example:
+// const ZYNKO_ROLE_ID = "123456789012345678";
+//
+const ZYNKO_ROLE_ID = "PUT_REAL_ZYNKO_ROLE_ID_HERE";
 
-// DASHBOARD UNLOCK CODE
-const DASHBOARD_CODE = "2567";
+const DB_FILE = "./database.json";
 
+const DASHBOARD_TIMEOUT = 10 * 60 * 1000;
+
+const SKIPPED_ROLES = new Set([
+  "Invite Tracker"
+]);
+
+// ============================================================
+// STARTUP CHECKS
 // ============================================================
 
 if (!TOKEN) {
@@ -51,11 +64,14 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const DASHBOARD_TIMEOUT = 10 * 60 * 1000;
-
-const SKIPPED_ROLES = new Set([
-  "Invite Tracker"
-]);
+if (
+  !ZYNKO_ROLE_ID ||
+  ZYNKO_ROLE_ID === "PUT_REAL_ZYNKO_ROLE_ID_HERE"
+) {
+  console.error("❌ ZYNKO_ROLE_ID has not been configured.");
+  console.error("Put the real Discord role ID in the code.");
+  process.exit(1);
+}
 
 // ============================================================
 // WEB SERVER
@@ -156,10 +172,7 @@ function loadDB() {
 
     return db;
   } catch (error) {
-    console.error(
-      "⚠️ Database error:",
-      error.message
-    );
+    console.error("⚠️ Database error:", error.message);
 
     return {
       guilds: {},
@@ -211,11 +224,7 @@ const client = new Client({
 // DASHBOARD SESSIONS
 // ============================================================
 
-// dashboard message ID -> session
 const sessions = new Map();
-
-// user ID -> unlocked
-const unlockedUsers = new Set();
 
 function createDashboardSession(message, userId) {
   if (!message?.id) return;
@@ -284,40 +293,39 @@ function validDashboardSession(interaction) {
 }
 
 // ============================================================
-// OWNER CHECK
+// ROLE-ONLY ACCESS
 // ============================================================
 
-function isOwner(interaction) {
-  return (
-    interaction.user?.id === OWNER_USER_ID
+function hasZynkoRole(member) {
+  if (!member) return false;
+
+  return member.roles.cache.has(
+    ZYNKO_ROLE_ID
   );
 }
 
-// ============================================================
-// DASHBOARD ACCESS
-// ============================================================
-
-function hasAccess(interaction) {
+async function hasAccess(interaction) {
   if (!interaction.guild) {
     return false;
   }
 
-  // ONLY YOUR ACCOUNT
-  if (!isOwner(interaction)) {
+  const member =
+    interaction.member ||
+    await interaction.guild.members
+      .fetch(interaction.user.id)
+      .catch(() => null);
+
+  if (!member) {
     return false;
   }
 
-  return true;
+  return hasZynkoRole(member);
 }
 
-async function requireAccess(interaction) {
-  if (hasAccess(interaction)) {
-    return true;
-  }
-
+async function denyAccess(interaction) {
   const response = {
     content:
-      "🔒 You are not authorized to use the Zynko Control Dashboard."
+      "🔒 You need the official **Zynko** role to use this dashboard."
   };
 
   try {
@@ -336,29 +344,6 @@ async function requireAccess(interaction) {
       });
     }
   } catch {}
-
-  return false;
-}
-
-// ============================================================
-// CODE LOCK
-// ============================================================
-
-function codeModal() {
-  return new ModalBuilder()
-    .setCustomId("dashboard_code")
-    .setTitle("🔐 Zynko Dashboard")
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("code")
-          .setLabel("Enter dashboard code")
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder("Enter your access code")
-          .setRequired(true)
-          .setMaxLength(20)
-      )
-    );
 }
 
 // ============================================================
@@ -564,7 +549,6 @@ async function restoreRoles(guild, snapshot) {
       );
 
     try {
-      // UPDATE EXISTING
       if (existing) {
         roleMap[savedRole.id] =
           existing.id;
@@ -590,7 +574,6 @@ async function restoreRoles(guild, snapshot) {
         continue;
       }
 
-      // ROLE LIMIT
       if (
         createdCount >=
         availableSlots
@@ -602,7 +585,6 @@ async function restoreRoles(guild, snapshot) {
         continue;
       }
 
-      // CREATE
       existing =
         await guild.roles.create({
           name: savedRole.name,
@@ -632,7 +614,6 @@ async function restoreRoles(guild, snapshot) {
     }
   }
 
-  // ROLE HIERARCHY
   const hierarchy = [];
 
   for (const savedRole of snapshot.roles) {
@@ -844,7 +825,6 @@ async function restoreChannels(
         : null;
 
     try {
-      // CREATE
       if (!channel) {
         const options = {
           name: saved.name,
@@ -897,10 +877,7 @@ async function restoreChannels(
           await guild.channels.create(
             options
           );
-      }
-
-      // UPDATE EXISTING
-      else {
+      } else {
         await channel.edit({
           parent: parentId,
           position:
@@ -972,7 +949,7 @@ async function restoreChannels(
 }
 
 // ============================================================
-// LOAD SERVER
+// LOAD SERVER SNAPSHOT
 // ============================================================
 
 async function loadServerSnapshot(
@@ -1132,7 +1109,7 @@ function homeEmbed(
     )
     .setFooter({
       text:
-        `Unlocked by ${user.username} • 10 minute session`
+        `Zynko role access • ${user.username}`
     })
     .setTimestamp();
 }
@@ -1717,7 +1694,10 @@ function helpEmbed() {
     .setTitle("❓ Help")
     .setDescription(
       "**/dashboard**\n" +
-      "Opens the locked Zynko dashboard.\n\n" +
+      "Opens the Zynko dashboard.\n\n" +
+
+      "**Access**\n" +
+      "Only members with the official Zynko role ID can use it.\n\n" +
 
       "**Templates**\n" +
       "Save and load complete server structures.\n\n" +
@@ -1741,7 +1721,7 @@ function helpEmbed() {
 }
 
 // ============================================================
-// MODAL
+// MODAL HELPER
 // ============================================================
 
 function makeModal(
@@ -1789,7 +1769,7 @@ function makeModal(
 }
 
 // ============================================================
-// /DASHBOARD
+// DASHBOARD COMMAND
 // ============================================================
 
 client.on(
@@ -1808,15 +1788,6 @@ client.on(
       return;
     }
 
-    // ONLY YOUR ACCOUNT
-    if (!isOwner(interaction)) {
-      return interaction.reply({
-        content:
-          "🔒 You are not authorized to use this dashboard.",
-        flags: 64
-      });
-    }
-
     if (!interaction.guild) {
       return interaction.reply({
         content:
@@ -1825,20 +1796,16 @@ client.on(
       });
     }
 
-    // ALREADY UNLOCKED
     if (
-      unlockedUsers.has(
-        interaction.user.id
-      )
+      !(await hasAccess(interaction))
     ) {
-      return openDashboard(
+      return denyAccess(
         interaction
       );
     }
 
-    // ASK FOR CODE
-    return interaction.showModal(
-      codeModal()
+    return openDashboard(
+      interaction
     );
   }
 );
@@ -1889,25 +1856,11 @@ client.on(
     }
 
     if (
-      !isOwner(interaction)
+      !(await hasAccess(interaction))
     ) {
-      return interaction.reply({
-        content:
-          "🔒 You are not authorized.",
-        flags: 64
-      }).catch(() => {});
-    }
-
-    if (
-      !unlockedUsers.has(
-        interaction.user.id
-      )
-    ) {
-      return interaction.reply({
-        content:
-          "🔒 Dashboard locked. Run `/dashboard` and enter the code.",
-        flags: 64
-      }).catch(() => {});
+      return denyAccess(
+        interaction
+      );
     }
 
     if (
@@ -1935,10 +1888,7 @@ client.on(
         guild.id
       );
 
-    // ========================================================
     // HOME
-    // ========================================================
-
     if (id === "go_home") {
       return interaction.update({
         embeds: [
@@ -2052,10 +2002,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // AUTOMATION
-    // ========================================================
-
     const automationMap = {
       auto_transcripts:
         "transcripts",
@@ -2101,10 +2048,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // MODERATION
-    // ========================================================
-
     const moderationMap = {
       mod_warnings:
         "warnings",
@@ -2147,10 +2091,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // SAVE TEMPLATE
-    // ========================================================
-
     if (
       id ===
       "template_create"
@@ -2171,10 +2112,7 @@ client.on(
       );
     }
 
-    // ========================================================
     // LOAD TEMPLATE
-    // ========================================================
-
     if (
       id ===
       "template_use"
@@ -2238,10 +2176,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // DELETE TEMPLATE
-    // ========================================================
-
     if (
       id ===
       "template_delete"
@@ -2305,10 +2240,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // BOT NAME
-    // ========================================================
-
     if (
       id ===
       "setting_botname"
@@ -2329,10 +2261,7 @@ client.on(
       );
     }
 
-    // ========================================================
     // EMBED
-    // ========================================================
-
     if (
       id ===
       "embed_create"
@@ -2388,10 +2317,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // USER LOOKUP
-    // ========================================================
-
     if (
       id ===
       "lookup_user"
@@ -2412,10 +2338,7 @@ client.on(
       );
     }
 
-    // ========================================================
     // MESSAGE LOOKUP
-    // ========================================================
-
     if (
       id ===
       "lookup_messages"
@@ -2453,25 +2376,11 @@ client.on(
     }
 
     if (
-      !isOwner(interaction)
+      !(await hasAccess(interaction))
     ) {
-      return interaction.reply({
-        content:
-          "🔒 You are not authorized.",
-        flags: 64
-      }).catch(() => {});
-    }
-
-    if (
-      !unlockedUsers.has(
-        interaction.user.id
-      )
-    ) {
-      return interaction.reply({
-        content:
-          "🔒 Dashboard locked.",
-        flags: 64
-      }).catch(() => {});
+      return denyAccess(
+        interaction
+      );
     }
 
     if (
@@ -2485,14 +2394,9 @@ client.on(
         embeds: [],
         components: []
       }).catch(() => {});
-
-      return;
     }
 
-    // ========================================================
-    // LOAD
-    // ========================================================
-
+    // LOAD TEMPLATE
     if (
       interaction.customId ===
       "select_template"
@@ -2572,10 +2476,7 @@ client.on(
       return;
     }
 
-    // ========================================================
-    // DELETE
-    // ========================================================
-
+    // DELETE TEMPLATE
     if (
       interaction.customId ===
       "delete_template"
@@ -2624,98 +2525,16 @@ client.on(
       return;
     }
 
-    // ========================================================
-    // DASHBOARD CODE
-    // ========================================================
-
+    // ALL MODALS REQUIRE ZYNKO ROLE
     if (
-      interaction.customId ===
-      "dashboard_code"
+      !(await hasAccess(interaction))
     ) {
-      // ONLY YOUR ACCOUNT
-      if (
-        !isOwner(interaction)
-      ) {
-        return interaction.reply({
-          content:
-            "🔒 You are not authorized.",
-          flags: 64
-        });
-      }
-
-      const entered =
-        interaction.fields
-          .getTextInputValue(
-            "code"
-          )
-          .trim();
-
-      if (
-        entered !==
-        DASHBOARD_CODE
-      ) {
-        return interaction.reply({
-          content:
-            "❌ Incorrect dashboard code.",
-          flags: 64
-        });
-      }
-
-      unlockedUsers.add(
-        interaction.user.id
+      return denyAccess(
+        interaction
       );
-
-      await interaction.reply({
-        content:
-          "✅ Dashboard unlocked.",
-        flags: 64
-      });
-
-      // Open dashboard as a NEW interaction
-      await interaction.followUp({
-        embeds: [
-          homeEmbed(
-            interaction.guild,
-            interaction.user
-          )
-        ],
-        components:
-          homeButtons()
-      }).then(message => {
-        createDashboardSession(
-          message,
-          interaction.user.id
-        );
-      }).catch(error => {
-        console.error(
-          "Dashboard open error:",
-          error
-        );
-      });
-
-      return;
     }
 
-    // EVERYTHING BELOW REQUIRES OWNER
-    // AND UNLOCKED DASHBOARD
-
-    if (
-      !isOwner(interaction) ||
-      !unlockedUsers.has(
-        interaction.user.id
-      )
-    ) {
-      return interaction.reply({
-        content:
-          "🔒 Dashboard locked.",
-        flags: 64
-      });
-    }
-
-    // ========================================================
     // SAVE TEMPLATE
-    // ========================================================
-
     if (
       interaction.customId ===
       "modal_template"
@@ -2808,10 +2627,7 @@ client.on(
       }
     }
 
-    // ========================================================
     // BOT NAME
-    // ========================================================
-
     if (
       interaction.customId ===
       "modal_botname"
@@ -2861,10 +2677,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // EMBED
-    // ========================================================
-
     if (
       interaction.customId ===
       "modal_embed"
@@ -2914,10 +2727,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // USER LOOKUP
-    // ========================================================
-
     if (
       interaction.customId ===
       "modal_lookup_user"
@@ -2997,10 +2807,7 @@ client.on(
       });
     }
 
-    // ========================================================
     // MESSAGE LOOKUP
-    // ========================================================
-
     if (
       interaction.customId ===
       "modal_lookup_messages"
@@ -3474,7 +3281,7 @@ async function registerCommands() {
         "dashboard"
       )
       .setDescription(
-        "Open the locked Zynko Control Dashboard"
+        "Open the Zynko Control Dashboard"
       )
   ];
 
@@ -3504,11 +3311,11 @@ async function registerCommands() {
     );
 
     console.log(
-      "🔐 Dashboard code protection enabled."
+      "🔐 Role-ID access enabled."
     );
 
     console.log(
-      "👤 Owner-only access enabled."
+      `🎭 Required role ID: ${ZYNKO_ROLE_ID}`
     );
 
   } catch (error) {
@@ -3543,11 +3350,7 @@ client.once(
     );
 
     console.log(
-      "🔐 Dashboard code: ENABLED"
-    );
-
-    console.log(
-      "👤 Owner-only dashboard: ENABLED"
+      "🔐 Role-only dashboard: ENABLED"
     );
 
     console.log(
