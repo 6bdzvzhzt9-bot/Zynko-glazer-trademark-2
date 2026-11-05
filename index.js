@@ -2848,7 +2848,7 @@ async function handleInteraction(interaction) {
       }
 
       if (interaction.commandName === 'open-mystery-box') return handleOpenMysteryBox(interaction);
-
+if (await handleNitradoCommand(interaction, isOwner(member))) return;
       // /authorize, /deauthorize, /authorized — developer only, home server only
       if (['authorize', 'deauthorize', 'authorized'].includes(interaction.commandName)) {
         if (!isControl(guild.id) || !isBotOwner(interaction.user, guild)) {
