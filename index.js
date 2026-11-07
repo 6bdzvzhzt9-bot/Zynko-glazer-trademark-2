@@ -2727,7 +2727,6 @@ const commands = [
   ...nitradoCommands,
   ...adminSearchCommands
 ].map(c => (typeof c.toJSON === 'function' ? c.toJSON() : c));
-
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
@@ -2825,9 +2824,12 @@ async function handleInteraction(interaction) {
       if (await handleNitradoComponent(interaction, true)) return;
     }
 
-    // AUTOCOMPLETE (nothing to suggest)
-    if (interaction.isAutocomplete()) return interaction.respond([]);
-
+    if (interaction.isAutocomplete()) {
+  if (interaction.commandName === 'adminsearch' && isBotOwner(interaction.user)) {
+    return handleAdminSearchAutocomplete(interaction);
+  }
+  return interaction.respond([]);
+}
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'help') {
         return interaction.reply({ embeds: [helpEmbed(guild)], ephemeral: true });
@@ -2838,7 +2840,16 @@ async function handleInteraction(interaction) {
       }
 
       if (interaction.commandName === 'open-mystery-box') return handleOpenMysteryBox(interaction);
-
+// Admin search: bot developer only
+if (interaction.commandName === 'adminsearch') {
+  if (!isBotOwner(interaction.user)) {
+    return interaction.reply({
+      content: 'This command is only available to the bot developer.',
+      ephemeral: true
+    });
+  }
+  return handleAdminSearch(interaction);
+}
       // Nitrado commands: bot developer only (they control the developer's own ARK servers)
       const NIT_CMDS = new Set(nitradoCommands.map(c => c.name));
       if (NIT_CMDS.has(interaction.commandName)) {
