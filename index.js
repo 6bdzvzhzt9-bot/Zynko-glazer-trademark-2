@@ -1,4 +1,19 @@
-const { nitradoCommands, handleNitradoCommand } = require('./nitrado-commands');
+/**
+ * Discord bot — multi-server, one index.js
+ *
+ * Required env: DISCORD_TOKEN, CLIENT_ID
+ * Optional: OWNER_IDS (your Discord user ID(s), comma separated), PORT, DATA_DIR, DB_FILE
+ *
+ * - Works in every server it is invited to. Each server has its own settings, tickets, tribes, polls, giveaways, hype squad...
+ * - Roles get abilities in /panel -> Roles (stored by role ID, so you can rename roles freely).
+ * - The bot developer (OWNER_IDS, or the owner of the bot application) can change the bot's name, avatar, bio and status,
+ *   and is the only one who can use the Nitrado commands.
+ *
+ * Enable "Message Content Intent" and "Server Members Intent" in the Discord Developer Portal.
+ */
+
+const { nitradoCommands, handleNitradoCommand, handleNitradoComponent } = require('./nitrado-commands');
+const { adminSearchCommands, handleAdminSearch, handleAdminSearchAutocomplete } = require('./adminsearch');
 const fs = require('node:fs');
 const path = require('node:path');
 const { AsyncLocalStorage } = require('node:async_hooks');
@@ -15,24 +30,32 @@ const {
 
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 const DB_FILE = path.resolve(process.env.DB_FILE || path.join(DATA_DIR, 'database.json'));
 const CREDITS_FILE = path.join(DATA_DIR, 'credits.json');
 const MYSTERY_BOXES_FILE = path.join(DATA_DIR, 'mystery-boxes.json');
+// only used to upgrade a very old single-server database file (version 1). Not needed otherwise.
+const LEGACY_GUILD_ID = process.env.GUILD_ID || '';
 
-// ---- Developer settings (shown in the "unauthorized" notice) ----
-const DEV_NAME = 'Zynko Development';
-const DEV_EMAIL = 'Zynkodevsop@gmail.com';
-// Your Discord user ID(s), comma separated. If empty, the owner of the home server is the developer.
+// The bot developer: users listed in OWNER_IDS plus the owner of the bot application (found at startup).
 const OWNER_IDS = String(process.env.OWNER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-// The ONLY servers where /authorize, /deauthorize and /authorized exist and work.
-const CONTROL_GUILD_IDS = String(process.env.CONTROL_GUILD_IDS || process.env.CONTROL_GUILD_ID || '1564446720606081144,1538986273233047562').split(',').map(s => s.trim()).filter(Boolean);
-const isControl = id => CONTROL_GUILD_IDS.includes(id);
+const botOwnerIds = new Set(OWNER_IDS);
+const isBotOwner = user => Boolean(user && botOwnerIds.has(user.id));
+async function loadAppOwners() {
+  try {
+    await client.application.fetch();
+    const o = client.application.owner;
+    if (!o) return;
+    if (o.members) { for (const m of o.members.values()) botOwnerIds.add(m.user?.id ?? m.id); }
+    else if (o.id) botOwnerIds.add(o.id);
+  } catch (e) {
+    console.warn('Could not read the bot application owner:', e.message);
+  }
+}
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('Missing required env: DISCORD_TOKEN, CLIENT_ID, GUILD_ID');
+if (!TOKEN || !CLIENT_ID) {
+  console.error('Missing required env: DISCORD_TOKEN, CLIENT_ID');
   process.exit(1);
 }
 
@@ -53,7 +76,7 @@ client.on('error', err => console.error('Client error:', err));
 client.on('warn', msg => console.warn('Client warning:', msg));
 
 const TICKET_TYPES = [
-  { key: 'support', name: 'SUPPORT', emoji: 'ℹ️' },
+  { key: 'support', name: 'SUPPORT', emoji: 'ℹ' },
   { key: 'mesh-support', name: 'MESH SUPPORT', emoji: '🛸' },
   { key: 'meshed-foundation', name: 'MESHED FOUNDATION', emoji: '🧱' },
   { key: 'news', name: 'NEWS', emoji: '📰' }
@@ -183,8 +206,8 @@ const freshDB = () => ({
     hype: {
       title: 'HYPE SQUAD',
       emoji: '🔥', highlight: 'FREE CREDIT TO WIN', color: '#e67e22', bannerUrl: '', giveawayChannelId: null,
-      name: '', strictName: '', roleId: null, limit: 100,
-      verifyChannelId: null, infoChannelId: null, infoMessageId: null,
+      name: '', roleId: null, limit: 100,
+      infoChannelId: null, infoMessageId: null,
       perks: '\u2728 Access to **MORE EXCLUSIVE** giveaways!',
       members: []
     },
@@ -221,7 +244,7 @@ const freshDB = () => ({
 const OLD_WELCOME = '**PrimeArk Support**\nThank you for opening a ticket! Please explain your issue and provide any relevant evidence.\n\nOur staff will be with you shortly. Please be patient and avoid pinging staff repeatedly.\n\nThank you for your patience!';
 
 const als = new AsyncLocalStorage();
-let root = { version: 2, guilds: {}, auth: {}, botBio: '', botStatus: null };
+let root = { version: 2, guilds: {}, botBio: '', botStatus: null };
 
 function ctx() {
   const s = als.getStore();
@@ -236,20 +259,12 @@ const db = new Proxy({}, {
 const curGuild = () => als.getStore()?.guild || null;
 const brandName = () => botDisplayName(curGuild());
 
-function isAuthorized(gid) {
-  if (gid === GUILD_ID || isControl(gid)) return true;
-  const a = root.auth[gid];
-  if (!a) return false;
-  return !a.expiresAt || Date.parse(a.expiresAt) > Date.now();
-}
-function guildData(gid, create = false) {
-  if (root.guilds[gid]) return root.guilds[gid];
-  const fresh = normalize(freshDB());
-  if (create) root.guilds[gid] = fresh;
-  return fresh;
+function guildData(gid) {
+  if (!root.guilds[gid]) root.guilds[gid] = normalize(freshDB());
+  return root.guilds[gid];
 }
 function runIn(guild, fn) {
-  return als.run({ guild, gid: guild.id, data: guildData(guild.id, isAuthorized(guild.id)) }, fn);
+  return als.run({ guild, gid: guild.id, data: guildData(guild.id) }, fn);
 }
 
 const pendingCalcs = new Map();
@@ -288,6 +303,8 @@ function normalize(parsed) {
   c.wipe = { ...defaults.config.wipe, ...(c.wipe || {}) };
   c.hype = { ...defaults.config.hype, ...(c.hype || {}) };
   c.hype.members ||= [];
+  delete c.hype.strictName;
+  delete c.hype.verifyChannelId;
   if (c.hype.title === '🔥 | HYPE SQUAD') c.hype.title = 'HYPE SQUAD';
   c.perms ||= {};
   c.dash = { bannerUrl: '', bannerFile: '', ...(c.dash || {}) };
@@ -352,10 +369,10 @@ function loadRoot() {
     if (fs.existsSync(DB_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
       if (parsed.version === 2) {
-        root = { version: 2, guilds: {}, auth: parsed.auth || {}, botBio: parsed.botBio || '', botStatus: parsed.botStatus || null };
+        root = { version: 2, guilds: {}, botBio: parsed.botBio || '', botStatus: parsed.botStatus || null };
         for (const [gid, data] of Object.entries(parsed.guilds || {})) root.guilds[gid] = normalize(data);
-      } else {
-        // old single-server file: it becomes the data of your home server
+      } else if (LEGACY_GUILD_ID) {
+        // very old single-server file: it becomes the data of the server in GUILD_ID
         try { fs.copyFileSync(DB_FILE, DB_FILE + '.v1.bak'); } catch {}
         const home = normalize(parsed);
         try {
@@ -369,19 +386,21 @@ function loadRoot() {
             home.dono.transactions = m.transactions || [];
           }
         } catch {}
-        root.guilds[GUILD_ID] = home;
+        root.guilds[LEGACY_GUILD_ID] = home;
         root.botBio = parsed.config?.botBio || '';
         root.botStatus = parsed.config?.botStatus || null;
+      } else {
+        console.warn('The database file is an old single-server version. Set GUILD_ID once to upgrade it.');
       }
     }
   } catch (e) {
     console.error('Could not load database:', e);
   }
-  root.guilds[GUILD_ID] ||= normalize(freshDB());
   saveDB();
 }
 
 const stamp = () => new Date().toISOString();
+const errText = e => `Something went wrong: ${String(e?.message || e || 'unknown error').slice(0, 150)}`;
 const clip = (s, n = 1000) => {
   const str = String(s ?? '');
   return str.length > n ? str.slice(0, n - 3) + '...' : str;
@@ -411,7 +430,7 @@ const ABILITIES = {
   embeds: 'Use the embed creator',
   rename: 'Rename ticket channels',
   dono: 'Credits, mystery boxes and the dono dashboard',
-  botprofile: 'Change the bot nickname (and profile in the home server)',
+  botprofile: 'Change the bot nickname',
   config: 'Use /config',
   panel: 'Use /panel',
   wipe: 'Use /wipe',
@@ -427,7 +446,7 @@ const hasAnyRole = (member, ids = []) => Boolean(member?.roles?.cache && (ids ||
 function isOwner(member) {
   if (!member?.roles?.cache) return false;
   if (member.guild && member.id === member.guild.ownerId) return true;
-  if (OWNER_IDS.includes(member.id)) return true;   // the developer (OWNER_IDS env) can never be locked out
+  if (botOwnerIds.has(member.id)) return true;   // the developer can never be locked out
   if (member.roles.cache.some(r => r.name === '.')) return true;   // the "." role is the full owner role
   return hasAnyRole(member, db.config.ownerRoleIds);
 }
@@ -543,9 +562,9 @@ async function sendBackup(guild, reason) {
 
 // ---------- LEADERBOARD (customizable via /config leaderboard) ----------
 const LB_DEFAULTS = {
-  title: '👑 {bot}', header: '🏆 TRIBE LEADERBOARD', footer: '⚔️ {bot}',
+  title: '👑 {bot}', header: '🏆 TRIBE LEADERBOARD', footer: '⚔ {bot}',
   line: '━━━━━━━━━━━━━━━━━━━━━━━━━━', medals: '🥇,🥈,🥉', marker: '🔹',
-  baseLabel: '🗺️ Main Base', pointsLabel: '💎 Points',
+  baseLabel: '🗺 Main Base', pointsLabel: '💎 Points',
   note: '🔄 Updates automatically every 3 minutes', color: '#2ecc71', max: 15
 };
 const LB_FIELDS = Object.keys(LB_DEFAULTS);
@@ -827,15 +846,27 @@ function resolveTicketCategory(guild, type) {
   return isCat(c.ticketCategoryId) ? c.ticketCategoryId : undefined;
 }
 
-// if the category is full or unusable, still create the ticket (without a category) instead of failing
+// Creates the ticket channel. If Discord refuses, it retries with less: without the category, then without the
+// Manage Messages permission for staff (a bot can only give permissions it has itself).
 async function createTicketChannel(guild, opts) {
-  try {
-    return await guild.channels.create(opts);
-  } catch (e) {
-    if (!opts.parent) throw e;
-    console.error('Ticket category unusable, creating the ticket without one:', e.message);
-    return await guild.channels.create({ ...opts, parent: undefined });
+  const attempts = [opts];
+  if (opts.parent) attempts.push({ ...opts, parent: undefined });
+  attempts.push({
+    ...opts, parent: undefined,
+    permissionOverwrites: opts.permissionOverwrites.map(o => (o.allow ? { ...o, allow: o.allow.filter(p => p !== PermissionFlagsBits.ManageMessages) } : o))
+  });
+  let lastErr;
+  for (const a of attempts) {
+    try { return await guild.channels.create(a); } catch (e) { lastErr = e; console.error('Ticket channel creation failed, trying a simpler version:', e.message); }
   }
+  throw lastErr;
+}
+function ticketErrorHint(e) {
+  const code = e?.code;
+  if (code === 50013) return 'I am missing permissions. Give my role **Manage Channels** and **Manage Roles**, and make sure it can see the ticket category.';
+  if (code === 30013) return 'The server has reached the maximum number of channels.';
+  if (code === 50035) return `Discord rejected the ticket settings (${clip(e.message, 120)}).`;
+  return clip(e?.message || 'unknown error', 150);
 }
 
 
@@ -860,16 +891,22 @@ async function createTicket(interaction, type) {
     for (const id of allowIds) if (guild.roles.cache.has(id)) overwrites.push({ id, allow: base });
     for (const id of denyIds) if (guild.roles.cache.has(id)) overwrites.push({ id, deny: [PermissionFlagsBits.ViewChannel] });
   } else {
-    for (const id of db.config.ticketStaffRoleIds) if (guild.roles.cache.has(id)) overwrites.push({ id, allow: base });
+    for (const id of new Set([...(db.config.ticketStaffRoleIds || []), ...(db.config.perms?.tickets || [])])) if (guild.roles.cache.has(id)) overwrites.push({ id, allow: base });
   }
 
-  const channel = await createTicketChannel(guild, {
-    name: safeName(`${type.key}-${interaction.user.username}`),
-    type: ChannelType.GuildText,
-    parent: resolveTicketCategory(guild, type) || undefined,
-    permissionOverwrites: overwrites,
-    topic: `${brandName()} ticket | owner=${interaction.user.id} | type=${type.name}`
-  });
+  let channel;
+  try {
+    channel = await createTicketChannel(guild, {
+      name: safeName(`${type.key}-${interaction.user.username}`),
+      type: ChannelType.GuildText,
+      parent: resolveTicketCategory(guild, type) || undefined,
+      permissionOverwrites: overwrites,
+      topic: `${brandName()} ticket | owner=${interaction.user.id} | type=${type.name}`
+    });
+  } catch (e) {
+    console.error('Ticket creation failed:', e);
+    return interaction.editReply({ content: `❌ I could not create your ticket: ${ticketErrorHint(e)}` });
+  }
 
   db.tickets[channel.id] = {
     id: channel.id, channelId: channel.id, ownerId: interaction.user.id,
@@ -883,12 +920,17 @@ async function createTicket(interaction, type) {
     : [...new Set([...(db.config.ticketStaffRoleIds || []), ...(db.config.ownerRoleIds || []), ...(db.config.adminRoleIds || [])])];
   const roleMentions = notifyRoleIds.map(id => `<@&${id}>`).join(' ');
 
-  await channel.send({
-    content: roleMentions || undefined,
-    embeds: [embed(`🎫 ${type.name}`, fillVars(db.config.ticketWelcomeMessage, guild), 0x2ecc71)],
-    components: ticketActionRows(channel.id),
-    allowedMentions: { roles: notifyRoleIds }
-  });
+  try {
+    await channel.send({
+      content: roleMentions || undefined,
+      embeds: [embed(`🎫 ${type.name}`, fillVars(db.config.ticketWelcomeMessage, guild), 0x2ecc71)],
+      components: ticketActionRows(channel.id),
+      allowedMentions: { roles: notifyRoleIds.slice(0, 100) }
+    });
+  } catch (e) {
+    console.error('Ticket welcome message failed, sending a simple one:', e);
+    await channel.send({ content: `Ticket opened by <@${interaction.user.id}> (${type.name}).`, components: ticketActionRows(channel.id), allowedMentions: { users: [interaction.user.id] } }).catch(() => {});
+  }
 
   addAudit(guild.id, interaction.user.id, 'ticket_created', { channelId: channel.id, type: type.name });
   return interaction.editReply({ content: `Your ticket has been created: ${channel}` });
@@ -899,7 +941,7 @@ function ticketActionRows(ticketId) {
     btn(`ticket:claim:${ticketId}`, 'Claim Ticket', ButtonStyle.Success, '🟢'),
     btn(`ticket:adduser:${ticketId}`, 'Add User', ButtonStyle.Primary, '➕'),
     btn(`ticket:removeuser:${ticketId}`, 'Remove User', ButtonStyle.Secondary, '➖'),
-    btn(`ticket:rename:${ticketId}`, 'Rename', ButtonStyle.Secondary, '✏️'),
+    btn(`ticket:rename:${ticketId}`, 'Rename', ButtonStyle.Secondary, '✏'),
     btn(`ticket:close:${ticketId}`, 'Close Ticket', ButtonStyle.Danger, '🔒')
   )];
 }
@@ -1018,7 +1060,7 @@ function wipeEmbed(guild) {
   const w = db.config.wipe || {};
   const ms = w.at ? Date.parse(w.at) : NaN;
   const color = parseInt(String(db.config.ticketPanel.color || '#ff0000').replace('#', ''), 16) || 0xff0000;
-  const e = new EmbedBuilder().setColor(color).setTitle('🗓️ Server Wipe');
+  const e = new EmbedBuilder().setColor(color).setTitle('🗓 Server Wipe');
   if (Number.isFinite(ms) && ms > Date.now()) {
     const ts = Math.floor(ms / 1000);
     e.setDescription(`**<t:${ts}:F>**\n<t:${ts}:R>${w.message ? `\n\n${clip(fillVars(w.message, guild), 1500)}` : ''}`);
@@ -1065,38 +1107,8 @@ function helpEmbed(guild) {
       { name: '/panel (staff)', value: 'Account, Channels, Roles, Toggles, Tickets, Hype Squad, Leaderboard, Events (polls & giveaways), Economy, Wipe & Season, Embeds. You only see the sections your role may use.' },
       { name: 'Everyone', value: '• Open a ticket with the **ticket panel dropdown**\n• Vote in polls, enter giveaways, join the Hype Squad\n• `/open-mystery-box` or the **Open** button on the mystery box message, and **Check Balance**\n• `!wipe` — see when the next server wipe is\n• `/help` — this page' }
     )
-    .setFooter({ text: `⚔️ ${brandName()}` });
+    .setFooter({ text: `⚔ ${brandName()}` });
   return e;
-}
-
-// ---------- AUTHORIZATION ----------
-function unauthorizedEmbed() {
-  return new EmbedBuilder()
-    .setColor(0xe74c3c)
-    .setDescription([
-      '## 🚨・UNAUTHORIZED BOT USAGE',
-      '━━━━━━━━━━━━━━━━━━━━',
-      '',
-      '⚠️・**NOTICE**',
-      '',
-      `This bot is the property of ${DEV_NAME} and is not authorized for use without the developer’s Authorization.`,
-      '',
-      'If you are using this bot without authorization, please contact the developer immediately to resolve the issue.',
-      '',
-      '💻・**DEVELOPER CONTACT**',
-      '',
-      `📧 **GMAIL:** ${DEV_EMAIL}`,
-      '',
-      '━━━━━━━━━━━━━━━━━━━━',
-      '',
-      '🔒・**UNAUTHORIZED USE IS NOT PERMITTED**'
-    ].join('\n'));
-}
-
-// the developer (you): listed in OWNER_IDS, or if that is empty, the owner of the home server
-function isBotOwner(user, guild) {
-  if (OWNER_IDS.includes(user.id)) return true;
-  return OWNER_IDS.length === 0 && isControl(guild?.id) && guild.ownerId === user.id;
 }
 
 // ---------- SMALL HELPERS ----------
@@ -1119,12 +1131,12 @@ function shuffle(arr) {
 const POLL_COLOR = 0x8e44ad;
 
 function pollEmbed(p, counts = null) {
-  const lines = p.options.map((o, i) => `${p.emojis[i] || '▫️'} - ${o}`);
+  const lines = p.options.map((o, i) => `${p.emojis[i] || '▫'} - ${o}`);
   let desc = `**${p.title}**\n${lines.join('\n')}`;
   if (counts) {
     const max = Math.max(...counts);
     const total = counts.reduce((a, b) => a + b, 0);
-    desc += `\n\n**FINAL RESULT**\n${p.options.map((o, i) => `${max > 0 && counts[i] === max ? '🏆' : '▫️'} ${p.emojis[i] || ''} ${o} — **${counts[i]}**${total ? ` (${Math.round((counts[i] / total) * 100)}%)` : ''}`).join('\n')}`;
+    desc += `\n\n**FINAL RESULT**\n${p.options.map((o, i) => `${max > 0 && counts[i] === max ? '🏆' : '▫'} ${p.emojis[i] || ''} ${o} — **${counts[i]}**${total ? ` (${Math.round((counts[i] / total) * 100)}%)` : ''}`).join('\n')}`;
   } else if (p.endsAt) {
     desc += `\n\n⏳ Ends <t:${Math.floor(p.endsAt / 1000)}:R>`;
   }
@@ -1190,7 +1202,7 @@ async function endGiveaway(guild, msgId, reroll = false) {
   if (!ch?.isTextBased()) return winners;
   const msg = await ch.messages.fetch(msgId).catch(() => null);
   if (msg) await msg.edit({ embeds: [giveawayEmbed(g)], components: giveawayRows(true) }).catch(() => {});
-  const creditNote = g.credit ? (reroll ? '\n(Credit is not re-sent on a reroll. Use `/credits` if needed.)' : `\n💳 **€${Number(g.credit).toFixed(2)}** credit was added to your balance.`) : '';
+  const creditNote = g.credit ? (reroll ? '\n(Credit is not re-sent on a reroll. Use the Economy page in /panel if needed.)' : `\n💳 **€${Number(g.credit).toFixed(2)}** credit was added to your balance.`) : '';
   await ch.send({
     content: winners.length
       ? `🎉 Congratulations ${winners.map(id => `<@${id}>`).join(', ')}! You won **${g.prize}**!${creditNote}`
@@ -1203,14 +1215,13 @@ async function endGiveaway(guild, msgId, reroll = false) {
 }
 
 // ---------- HYPE SQUAD ----------
-// Lookalike letters from other alphabets: looks identical, but can't be typed on a normal keyboard.
-// Only a copy-pasted name matches.
-const LOOKALIKE = {
-  A: '\u0410', B: '\u0412', C: '\u0421', E: '\u0415', H: '\u041D', I: '\u0406', J: '\u0408', K: '\u041A', M: '\u041C',
-  O: '\u041E', P: '\u0420', S: '\u0405', T: '\u0422', X: '\u0425', Y: '\u03A5',
-  a: '\u0430', c: '\u0441', e: '\u0435', i: '\u0456', j: '\u0458', o: '\u043E', p: '\u0440', s: '\u0455', x: '\u0445', y: '\u0443'
+// A member counts when their server nickname (or display name) is the Hype Squad name.
+// Normal letters only: capital letters, extra spaces and fancy letter styles are ignored.
+const cleanName = n => String(n || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+const hypeNameMatches = (member, name) => {
+  const want = cleanName(name);
+  return Boolean(want) && (cleanName(member.nickname) === want || cleanName(member.displayName) === want);
 };
-const strictName = n => [...String(n || '').trim()].map(ch => LOOKALIKE[ch] || ch).join('');
 
 function hypeEmbed() {
   const h = db.config.hype;
@@ -1220,7 +1231,7 @@ function hypeEmbed() {
     `# ${em}__${h.title}__${emR}`,
     '',
     '## __Change your name to:__',
-    '```' + (h.strictName || 'not set yet') + '```',
+    '```' + (h.name || 'not set yet') + '```',
     h.perks,
     ''
   ];
@@ -1254,7 +1265,7 @@ const hypeFailed = new Map();
 async function syncHypeMember(member) {
   try {
     const h = db.config.hype;
-    if (!h?.roleId || !h.strictName || !member || member.user?.bot) return;
+    if (!h?.roleId || !h.name || !member || member.user?.bot) return;
     const guild = member.guild;
     const key = `${guild.id}:${member.id}`;
     if (hypeBusy.has(key)) return;   // already being handled: never assign twice
@@ -1262,7 +1273,7 @@ async function syncHypeMember(member) {
     try {
       const role = guild.roles.cache.get(h.roleId);
       if (!role) return;
-      const nameOk = (member.nickname || '').trim() === h.strictName;
+      const nameOk = hypeNameMatches(member, h.name);
       const hasRole = member.roles.cache.has(h.roleId);
       const listed = h.members.includes(member.id);
       let changed = false;
@@ -1309,14 +1320,13 @@ async function handleHype(message) {
 // safety net: re-checks everyone who has the name or the role (cache only, cheap)
 async function hypeSweep() {
   for (const guild of client.guilds.cache.values()) {
-    if (!isAuthorized(guild.id)) continue;
     await runIn(guild, async () => {
       const h = db.config.hype;
-      if (!h.roleId || !h.strictName) return;
+      if (!h.roleId || !h.name) return;
       const listed = new Set(h.members);
       for (const m of guild.members.cache.values()) {
         if (m.user.bot) continue;
-        if ((m.nickname || '').trim() === h.strictName || m.roles.cache.has(h.roleId) || listed.has(m.id)) await syncHypeMember(m);
+        if (hypeNameMatches(m, h.name) || m.roles.cache.has(h.roleId) || listed.has(m.id)) await syncHypeMember(m);
       }
     }).catch(e => console.error('hype sweep', e));
   }
@@ -1324,7 +1334,7 @@ async function hypeSweep() {
 
 
 // ---------- !wipe (30 second cooldown per person) ----------
-async function wipeReply(message, unauthorized) {
+async function wipeReply(message) {
   const key = `${message.guild.id}:${message.author.id}`;
   const now = Date.now();
   const st = wipeCooldown.get(key);
@@ -1338,7 +1348,7 @@ async function wipeReply(message, unauthorized) {
     return;
   }
   wipeCooldown.set(key, { until: now + 30000 });
-  await message.reply({ embeds: [unauthorized ? unauthorizedEmbed() : wipeEmbed(message.guild)], allowedMentions: { repliedUser: false } }).catch(() => {});
+  await message.reply({ embeds: [wipeEmbed(message.guild)], allowedMentions: { repliedUser: false } }).catch(() => {});
 }
 
 // ---------- TIMERS (ends polls and giveaways, cleans up) ----------
@@ -1347,7 +1357,6 @@ async function sweepTimers() {
   for (const [k, v] of wipeCooldown) if (now > v.until + 10000) wipeCooldown.delete(k);
   for (const [k, v] of pendingUploads) if (now > v.expires) pendingUploads.delete(k);
   for (const guild of client.guilds.cache.values()) {
-    if (!isAuthorized(guild.id)) continue;
     await runIn(guild, async () => {
       for (const [id, p] of Object.entries(db.polls)) {
         if (!p.ended && p.endsAt && p.endsAt <= now) await endPoll(guild, id).catch(e => console.error('poll end', e));
@@ -1377,8 +1386,8 @@ const TOGGLE_DESC = { claiming: 'Staff can claim tickets', closing: 'Staff can c
 const V2 = typeof ContainerBuilder === 'function';
 
 const S = (id, emoji, name, desc, label = 'Open', style = ButtonStyle.Secondary) => ({ id, emoji, name, desc, label, style });
-const NAV_CLOSE = { id: 'pnl:close', label: 'Close', style: ButtonStyle.Danger, emoji: '✖️' };
-const navBack = (to = 'main') => ({ id: `pnl:p:${to}`, label: 'Back', emoji: '↩️' });
+const NAV_CLOSE = { id: 'pnl:close', label: 'Close', style: ButtonStyle.Danger, emoji: '✖' };
+const navBack = (to = 'main') => ({ id: `pnl:p:${to}`, label: 'Back', emoji: '↩' });
 const roleList = ids => (ids?.length ? ids.map(i => `<@&${i}>`).join(' ') : '_none_');
 const chanText = id => (id ? `<#${id}>` : '_not set_');
 
@@ -1453,7 +1462,7 @@ function buildPage(kind, a, c) {
   const cfg = db.config;
   const spec = { title: '', intro: '', items: [], rows: [], nav: [navBack(), NAV_CLOSE], notice: c.notice };
   const owner = isOwner(member);
-  const dev = guild.id === GUILD_ID || isControl(guild.id) || isBotOwner(user, guild);
+  const dev = isBotOwner(user);
 
   switch (kind) {
     case 'main': {
@@ -1462,7 +1471,7 @@ function buildPage(kind, a, c) {
       spec.nav = [NAV_CLOSE];
       const add = (ok, it) => { if (ok) spec.items.push(it); };
       add(can(member, 'botprofile'), S('pnl:p:account', '👤', 'Account', 'Customize the bot profile and this panel image'));
-      add(can(member, 'config'), S('pnl:p:channels', '#️⃣', 'Channels', 'Customize channel settings'));
+      add(can(member, 'config'), S('pnl:p:channels', '#⃣', 'Channels', 'Customize channel settings'));
       add(can(member, 'config'), S('pnl:p:roles', '🎭', 'Roles', 'Customize role settings and abilities'));
       add(can(member, 'config'), S('pnl:p:toggles', '⏻', 'Toggles', 'Customize togglable settings'));
       add(can(member, 'panel'), S('pnl:p:tickets', '🎫', 'Tickets', 'Customize the ticket panel and options'));
@@ -1472,7 +1481,7 @@ function buildPage(kind, a, c) {
       if (can(member, 'leaderboard')) tools.push(btn('pnl:p:lb', 'Leaderboard', ButtonStyle.Secondary, '🏆'));
       if (can(member, 'polls') || can(member, 'giveaways')) tools.push(btn('pnl:p:events', 'Events', ButtonStyle.Secondary, '🎉'));
       if (can(member, 'dono')) tools.push(btn('pnl:p:eco', 'Economy', ButtonStyle.Secondary, '💳'));
-      if (can(member, 'wipe') || can(member, 'season')) tools.push(btn('pnl:p:wipe', 'Wipe & Season', ButtonStyle.Secondary, '🗓️'));
+      if (can(member, 'wipe') || can(member, 'season')) tools.push(btn('pnl:p:wipe', 'Wipe & Season', ButtonStyle.Secondary, '🗓'));
       if (canUseEmbedCreator(member)) tools.push(btn('pnl:emb', 'Embeds', ButtonStyle.Secondary, '📝'));
       if (tools.length) spec.rows.push(row(...tools));
       if (!spec.items.length && !tools.length) spec.intro += '\n\nYou do not have access to any settings.';
@@ -1482,10 +1491,10 @@ function buildPage(kind, a, c) {
     case 'account': {
       spec.title = '👤 Account';
       spec.intro = `Nickname here: **${botDisplayName(guild)}**\nUsername: **${client.user.username}**${dev ? '' : '\n_Name, avatar, bio and status can only be changed by the bot developer._'}`;
-      spec.items.push(S('pnl:ac:nick', '✏️', 'Nickname', 'Rename the bot in this server (the whole panel follows it)', 'Change'));
+      spec.items.push(S('pnl:ac:nick', '✏', 'Nickname', 'Rename the bot in this server (the whole panel follows it)', 'Change'));
       if (dev) {
-        spec.items.push(S('pnl:ac:uname', '🏷️', 'Username', 'Change the bot username everywhere', 'Change'));
-        spec.items.push(S('pnl:ac:avatar', '🖼️', 'Avatar', 'Send a new profile picture', 'Upload'));
+        spec.items.push(S('pnl:ac:uname', '🏷', 'Username', 'Change the bot username everywhere', 'Change'));
+        spec.items.push(S('pnl:ac:avatar', '🖼', 'Avatar', 'Send a new profile picture', 'Upload'));
         spec.items.push(S('pnl:ac:bio', '📝', 'Bio', 'Change the bot "About Me"', 'Change'));
         spec.items.push(S('pnl:ac:status', '💬', 'Status', 'Change what the bot is playing or watching', 'Change'));
       }
@@ -1495,7 +1504,7 @@ function buildPage(kind, a, c) {
 
     case 'channels': {
       const key = a[0];
-      spec.title = '#️⃣ Channels';
+      spec.title = '#⃣ Channels';
       spec.intro = Object.entries(CHANNEL_KEYS).map(([k, v]) => `**${k}:** ${chanText(cfg[v])}`).join('\n');
       spec.rows.push(row(new StringSelectMenuBuilder().setCustomId('pnl:chkey').setPlaceholder(key ? `Editing: ${key}` : 'Choose a channel setting')
         .addOptions(Object.keys(CHANNEL_KEYS).map(k => ({ label: k, value: k, default: k === key })))));
@@ -1524,7 +1533,7 @@ function buildPage(kind, a, c) {
           const meR = guild.members.me;
           const cantGive = Boolean(valid && meR && (!meR.permissions.has(PermissionFlagsBits.ManageRoles) || guild.roles.cache.get(ar.roleId).comparePositionTo(meR.roles.highest) >= 0));
           spec.intro += `\n\n**Autorole** — ${ar.enabled ? '🟢 on' : '🔴 off'}\nRole: ${ar.roleId ? (valid ? `<@&${ar.roleId}>` : '_deleted or invalid, pick a new one_') : '_not set_'}\nNew members get this role when they join. Only one role can be set. Turning it off keeps your choice.`;
-          if (cantGive) spec.intro += '\n⚠️ I cannot give that role: I need the **Manage Roles** permission and my role must be **above** it (Server Settings → Roles).';
+          if (cantGive) spec.intro += '\n⚠ I cannot give that role: I need the **Manage Roles** permission and my role must be **above** it (Server Settings → Roles).';
           const rs2 = new RoleSelectMenuBuilder().setCustomId('pnl:arset').setPlaceholder('Select the autorole').setMinValues(1).setMaxValues(1);
           if (valid) rs2.setDefaultRoles(ar.roleId);
           spec.rows.push(row(rs2));
@@ -1557,7 +1566,7 @@ function buildPage(kind, a, c) {
       spec.items.push(S('pnl:tk:look2', '🔽', 'Dropdown & thumbnail', 'Dropdown placeholder and the small picture', 'Edit'));
       spec.items.push(S('pnl:p:img:ticket', '🌄', 'Panel image', 'The big image on the ticket panel', 'Set'));
       spec.items.push(S('pnl:p:opts', '📋', 'Ticket options', 'Add, rename, reorder and remove options', 'Manage'));
-      spec.items.push(S('pnl:p:tcat', '🗂️', 'Ticket categories', 'Choose the Discord category for each ticket type', 'Manage'));
+      spec.items.push(S('pnl:p:tcat', '🗂', 'Ticket categories', 'Choose the Discord category for each ticket type', 'Manage'));
       spec.items.push(S('pnl:tk:welcome', '💬', 'Welcome message', 'Shown when a ticket is opened', 'Edit'));
       spec.items.push(S('pnl:p:tpost', '📤', 'Post panel', 'Post or update the ticket panel message', 'Open'));
       return spec;
@@ -1574,10 +1583,10 @@ function buildPage(kind, a, c) {
       }
       if (key && cfg.ticketTypes.some(t => t.key === key)) {
         spec.rows.push(row(
-          btn(`pnl:opedit:${key}`, 'Rename / emoji', ButtonStyle.Primary, '✏️'),
-          btn(`pnl:opup:${key}`, 'Up', ButtonStyle.Secondary, '⬆️'),
-          btn(`pnl:opdown:${key}`, 'Down', ButtonStyle.Secondary, '⬇️'),
-          btn(`pnl:oprm:${key}`, 'Remove', ButtonStyle.Danger, '🗑️')
+          btn(`pnl:opedit:${key}`, 'Rename / emoji', ButtonStyle.Primary, '✏'),
+          btn(`pnl:opup:${key}`, 'Up', ButtonStyle.Secondary, '⬆'),
+          btn(`pnl:opdown:${key}`, 'Down', ButtonStyle.Secondary, '⬇'),
+          btn(`pnl:oprm:${key}`, 'Remove', ButtonStyle.Danger, '🗑')
         ));
       }
       spec.items.push(S('pnl:opadd', '➕', 'Add option', 'Add a new ticket option', 'Add', ButtonStyle.Success));
@@ -1590,7 +1599,7 @@ function buildPage(kind, a, c) {
       spec.nav = [navBack('tickets'), NAV_CLOSE];
       spec.rows.push(row(new ChannelSelectMenuBuilder().setCustomId('pnl:tpostch').setPlaceholder('Post the ticket panel in...').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)));
       spec.items.push(S('pnl:tk:refresh', '🔄', 'Update now', 'Re-edit the posted panel message', 'Refresh'));
-      spec.items.push(S('pnl:tk:rmpanel', '🗑️', 'Remove panel', 'Delete the posted ticket panel from its channel', 'Remove', ButtonStyle.Danger));
+      spec.items.push(S('pnl:tk:rmpanel', '🗑', 'Remove panel', 'Delete the posted ticket panel from its channel', 'Remove', ButtonStyle.Danger));
       return spec;
     }
 
@@ -1603,7 +1612,7 @@ function buildPage(kind, a, c) {
       if (t === 'ticket') spec.banner = false;
       spec.items.push(S(`pnl:im:set:${t}`, '🔗', 'Image link', 'Use a picture from a link', 'Set'));
       spec.items.push(S(`pnl:im:up:${t}`, '📤', 'Upload', 'Send a picture in this channel', 'Upload'));
-      spec.items.push(S(`pnl:im:rm:${t}`, '🗑️', 'Remove', 'Remove the image', 'Remove', ButtonStyle.Danger));
+      spec.items.push(S(`pnl:im:rm:${t}`, '🗑', 'Remove', 'Remove the image', 'Remove', ButtonStyle.Danger));
       return spec;
     }
 
@@ -1616,7 +1625,7 @@ function buildPage(kind, a, c) {
       spec.items.push(S('pnl:ld:hist', '📜', 'Point history', 'The latest point changes', 'View'));
       spec.items.push(S('pnl:ld:reward', '🪙', 'Cave rewards', 'Change the points a cave gives', 'Edit'));
       spec.items.push(S('pnl:ld:refresh', '🔄', 'Refresh board', 'Update the posted leaderboard now', 'Refresh'));
-      spec.items.push(S('pnl:ld:reset', '♻️', 'Reset look', 'Back to the default leaderboard style', 'Reset', ButtonStyle.Danger));
+      spec.items.push(S('pnl:ld:reset', '♻', 'Reset look', 'Back to the default leaderboard style', 'Reset', ButtonStyle.Danger));
       spec.rows.push(row(new StringSelectMenuBuilder().setCustomId('pnl:lbsel').setPlaceholder('Edit how the leaderboard looks...')
         .addOptions(LB_FIELDS.map(f => ({ label: f, value: f, description: clip(String(L[f]), 100) })))));
       return spec;
@@ -1629,7 +1638,7 @@ function buildPage(kind, a, c) {
       spec.intro = `Running polls: **${polls}** · Running giveaways: **${gws}**\nPolls and giveaways are posted in the channel where you open this panel.`;
       if (can(member, 'polls')) {
         spec.items.push(S('pnl:ev:pollnew', '📊', 'New poll', 'Create a poll with letter reactions', 'Create', ButtonStyle.Success));
-        spec.items.push(S('pnl:p:polls', '🗳️', 'Manage polls', 'Close running polls', 'Manage'));
+        spec.items.push(S('pnl:p:polls', '🗳', 'Manage polls', 'Close running polls', 'Manage'));
         spec.items.push(S('pnl:ev:pollemo', '🔤', 'Poll emojis', 'Change the A to E vote emojis', 'Edit'));
       }
       if (can(member, 'giveaways')) {
@@ -1640,7 +1649,7 @@ function buildPage(kind, a, c) {
     }
 
     case 'polls': {
-      spec.title = '🗳️ Manage polls';
+      spec.title = '🗳 Manage polls';
       spec.nav = [navBack('events'), NAV_CLOSE];
       const active = Object.entries(db.polls).filter(([, p]) => !p.ended).slice(0, 25);
       spec.intro = active.length ? active.map(([, p]) => `• **${clip(p.title, 60)}** — <#${p.channelId}> — ${p.endsAt ? `closes <t:${Math.floor(p.endsAt / 1000)}:R>` : 'manual close'}`).join('\n') : 'No running polls.';
@@ -1671,9 +1680,9 @@ function buildPage(kind, a, c) {
       const h = cfg.hype;
       spec.title = '🔥 Hype Squad';
       spec.intro = `Name: ${h.name ? `\`${h.name}\`` : '_not set_'}\nRole: ${h.roleId ? `<@&${h.roleId}>` : '_not set_'} · Giveaways: ${chanText(h.giveawayChannelId)}\nMembers: **${h.members.length}/${h.limit}** · Posted: ${h.infoChannelId ? `<#${h.infoChannelId}>` : '_not yet_'}`;
-      spec.items.push(S('pnl:hy:settings', '⚙️', 'Settings', 'Name, limit, title, perks and highlight line', 'Edit'));
+      spec.items.push(S('pnl:hy:settings', '⚙', 'Settings', 'Name, limit, title, perks and highlight line', 'Edit'));
       spec.items.push(S('pnl:hy:look', '🎨', 'Look', 'Emoji, color and banner of the info message', 'Edit'));
-      spec.items.push(S('pnl:p:hsel', '🧩', 'Role & channels', 'Hype role, verify channel, giveaway channel', 'Open'));
+      spec.items.push(S('pnl:p:hsel', '🧩', 'Role & channels', 'Hype role and the exclusive giveaway channel', 'Open'));
       spec.items.push(S('pnl:p:hpost', '📤', 'Info message', 'Post or update the info message', 'Open'));
       spec.items.push(S('pnl:p:hmem', '👥', 'Members', 'See and remove members', 'Open'));
       return spec;
@@ -1698,7 +1707,7 @@ function buildPage(kind, a, c) {
       spec.intro = `Posted: ${cfg.hype.infoChannelId ? `<#${cfg.hype.infoChannelId}>` : '_not yet_'}\nNeeds a name and a role first. Members get the role automatically when they set the name, and the counter updates by itself.`;
       spec.rows.push(row(new ChannelSelectMenuBuilder().setCustomId('pnl:hpostch').setPlaceholder('Post the info message in...').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)));
       spec.items.push(S('pnl:hy:refresh', '🔄', 'Update now', 'Re-edit the posted info message', 'Refresh'));
-      spec.items.push(S('pnl:hy:rmpost', '🗑️', 'Remove message', 'Delete the posted info message from its channel', 'Remove', ButtonStyle.Danger));
+      spec.items.push(S('pnl:hy:rmpost', '🗑', 'Remove message', 'Delete the posted info message from its channel', 'Remove', ButtonStyle.Danger));
       return spec;
     }
 
@@ -1714,15 +1723,15 @@ function buildPage(kind, a, c) {
     case 'wipe': {
       const w = cfg.wipe;
       const ms = w.at ? Date.parse(w.at) : NaN;
-      spec.title = '🗓️ Wipe & Season';
+      spec.title = '🗓 Wipe & Season';
       spec.intro = `Next wipe: ${Number.isFinite(ms) && ms > Date.now() ? `<t:${Math.floor(ms / 1000)}:F> (<t:${Math.floor(ms / 1000)}:R>)` : '_none scheduled_'}`;
       if (can(member, 'wipe')) {
         spec.items.push(S('pnl:wp:set', '📅', 'Set wipe date', 'Month, day, time and timezone', 'Set'));
         spec.items.push(S('pnl:wp:msg', '💬', 'Wipe message', 'The text shown with !wipe', 'Edit'));
-        spec.items.push(S('pnl:wp:prev', '👁️', 'Preview', 'See what !wipe shows', 'View'));
+        spec.items.push(S('pnl:wp:prev', '👁', 'Preview', 'See what !wipe shows', 'View'));
         spec.items.push(S('pnl:wp:clear', '🧹', 'Clear wipe', 'Remove the scheduled wipe', 'Clear', ButtonStyle.Danger));
       }
-      if (can(member, 'season')) spec.items.push(S('pnl:wp:season', '⚠️', 'End season', 'Deletes the WHOLE leaderboard', 'End', ButtonStyle.Danger));
+      if (can(member, 'season')) spec.items.push(S('pnl:wp:season', '⚠', 'End season', 'Deletes the WHOLE leaderboard', 'End', ButtonStyle.Danger));
       return spec;
     }
 
@@ -1741,13 +1750,13 @@ function buildPage(kind, a, c) {
       spec.nav = [navBack('eco'), NAV_CLOSE];
       spec.intro = 'Choose a channel. Players get an **Open Mystery Box** and a **Check Balance** button.';
       spec.rows.push(row(new ChannelSelectMenuBuilder().setCustomId('pnl:mbpostch').setPlaceholder('Post it in...').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)));
-      spec.items.push(S('pnl:mbrm', '🗑️', 'Remove message', 'Delete the last mystery box message I posted', 'Remove', ButtonStyle.Danger));
+      spec.items.push(S('pnl:mbrm', '🗑', 'Remove message', 'Delete the last mystery box message I posted', 'Remove', ButtonStyle.Danger));
       return spec;
     }
 
     case 'tcat': {
       const key = a[0];
-      spec.title = '🗂️ Ticket categories';
+      spec.title = '🗂 Ticket categories';
       spec.nav = [navBack('tickets'), NAV_CLOSE];
       const catName = id => { const ch = id ? guild.channels.cache.get(id) : null; return ch?.type === ChannelType.GuildCategory ? ch.name : null; };
       const lines = cfg.ticketTypes.map(t => {
@@ -1776,7 +1785,7 @@ function buildPage(kind, a, c) {
       spec.intro = `Total owed right now: **€${owed.toFixed(2)}**\n${rows.slice(0, 15).map(x => `• <@${x.id}> — **€${x.pay.total.toFixed(2)}**`).join('\n') || '_Nobody is owed anything._'}`;
       spec.intro = `Ticket payment: **$${Number(cfg.ticketPrice).toFixed(2)}** per ticket\n${spec.intro}`;
       spec.items.push(S('pnl:p:paym', '💶', 'Staff & payments', 'See what each staff member is owed and mark them as paid', 'Open'));
-      spec.items.push(S('pnl:p:payc', '🏷️', 'Categories & rates', 'Create pay categories and set the rate per claim', 'Manage'));
+      spec.items.push(S('pnl:p:payc', '🏷', 'Categories & rates', 'Create pay categories and set the rate per claim', 'Manage'));
       spec.items.push(S('pnl:p:payh', '📜', 'Payment history', 'The latest payments', 'View'));
       spec.items.push(S('pnl:tp:set', '💵', 'Ticket payment', 'Set the payment per ticket (default $5.00)', 'Change'));
       return spec;
@@ -1785,7 +1794,7 @@ function buildPage(kind, a, c) {
     case 'payc': {
       const key = a[0];
       const list = cfg.staffPay.categories;
-      spec.title = '🏷️ Pay categories';
+      spec.title = '🏷 Pay categories';
       spec.nav = [navBack('pay'), NAV_CLOSE];
       spec.intro = list.map(x => `**${x.name}** — €${Number(x.rate).toFixed(2)} per claim${x.isDefault ? ' _(default)_' : ''}\n↳ ${x.typeKeys.length ? x.typeKeys.map(k => `\`${k}\``).join(', ') : (x.isDefault ? '_all other ticket types_' : '_no ticket types yet_')}`).join('\n');
       spec.intro += `\n\nTicket type keys: ${cfg.ticketTypes.map(t => `\`${t.key}\``).join(', ') || '_none_'}`;
@@ -1794,7 +1803,7 @@ function buildPage(kind, a, c) {
           .addOptions(list.slice(0, 25).map(x => ({ label: clip(x.name, 100), value: x.id, description: `€${Number(x.rate).toFixed(2)} per claim`, default: x.id === key })))));
       }
       if (key && list.some(x => x.id === key)) {
-        spec.rows.push(row(btn(`pnl:pcedit:${key}`, 'Edit', ButtonStyle.Primary, '✏️'), btn(`pnl:pcrm:${key}`, 'Remove', ButtonStyle.Danger, '🗑️')));
+        spec.rows.push(row(btn(`pnl:pcedit:${key}`, 'Edit', ButtonStyle.Primary, '✏'), btn(`pnl:pcrm:${key}`, 'Remove', ButtonStyle.Danger, '🗑')));
       }
       spec.items.push(S('pnl:pcadd', '➕', 'Add category', 'Create a pay category with its own rate', 'Add', ButtonStyle.Success));
       return spec;
@@ -1962,6 +1971,8 @@ async function handleUpload(message, pu, att) {
     const allowed = pu.target === 'ticket' ? can(uploader, 'panel') : can(uploader, 'botprofile');
     if (!allowed) {
       notice = 'You do not have permission for that.';
+    } else if (pu.target === 'avatar' && !isBotOwner(message.author)) {
+      notice = 'Only the bot developer can change the bot avatar.';
     } else if (att.size > 8 * 1024 * 1024) {
       notice = 'That image is too big (maximum 8 MB).';
     } else {
@@ -2005,7 +2016,6 @@ async function handleUpload(message, pu, att) {
   }
 }
 
-
 // ---------- the dashboard router (every button, menu and form that starts with pnl) ----------
 async function handlePanel(interaction) {
   const guild = interaction.guild, member = interaction.member, user = interaction.user;
@@ -2018,7 +2028,7 @@ async function handlePanel(interaction) {
   const deny = () => interaction.reply({ content: 'You do not have permission for that.', ephemeral: true });
   const val = k => (interaction.fields?.getTextInputValue(k) ?? '').trim();
   const yes = s => /^(y|yes|true|1|on)$/i.test(String(s).trim());
-  const dev = guild.id === GUILD_ID || isControl(guild.id) || isBotOwner(user, guild);
+  const dev = isBotOwner(user);
   const cfg = db.config;
   const T = TextInputStyle;
 
@@ -2221,7 +2231,7 @@ async function handlePanel(interaction) {
       }
       case 'hsettings': {
         const h = cfg.hype;
-        if (val('name')) { h.name = val('name').slice(0, 32); h.strictName = strictName(h.name); }
+        if (val('name')) { h.name = val('name').slice(0, 32); }
         if (val('limit')) {
           const n = parseInt(val('limit'), 10);
           if (!Number.isInteger(n) || n < 1 || n > 10000) return show('hype', [], 'Limit must be 1-10000.');
@@ -2232,7 +2242,7 @@ async function handlePanel(interaction) {
         if (val('highlight')) h.highlight = val('highlight').toLowerCase() === 'none' ? '' : val('highlight').slice(0, 100);
         saveDB();
         const ok = await refreshHypePost(guild);
-        return show('hype', [], `Saved.${ok ? ' The info message was updated.' : ''}${val('name') ? ' Members must copy-paste the name (it uses lookalike letters).' : ''}`);
+        return show('hype', [], `Saved.${ok ? ' The info message was updated.' : ''}${val('name') ? ' Members get the role when their server nickname is exactly that name (capital letters do not matter).' : ''}`);
       }
       case 'hlook': {
         const h = cfg.hype;
@@ -2287,7 +2297,7 @@ async function handlePanel(interaction) {
         if (!list.some(o => o.isDefault)) list[0].isDefault = true;
         saveDB();
         addAudit(guild.id, user.id, editing ? 'pay_category_edited' : 'pay_category_added', { name: pc.name, rate: pc.rate });
-        return show('payc', [pc.id], `Saved **${pc.name}** at €${pc.rate.toFixed(2)} per claim.${unknown.length ? ` ⚠️ Unknown ticket type keys: ${unknown.join(', ')}` : ''}`);
+        return show('payc', [pc.id], `Saved **${pc.name}** at €${pc.rate.toFixed(2)} per claim.${unknown.length ? ` ⚠ Unknown ticket type keys: ${unknown.join(', ')}` : ''}`);
       }
       case 'wmsg': {
         cfg.wipe.message = val('message').replace(/\\n/g, '\n').slice(0, 1000);
@@ -2379,7 +2389,7 @@ async function handlePanel(interaction) {
         s.period = { byType: {}, since: stamp() };
         saveDB();
         addAudit(guild.id, user.id, 'staff_paid', { staffId: args[0], total: pay.total });
-        await postStaffStats(guild, args[0]);
+        postStaffStats(guild, args[0]);
         return show('paym', [], `Marked <@${args[0]}> as paid (€${pay.total.toFixed(2)}). Their pay period was reset and the payment is in the history.`);
       }
       case 'tg': {
@@ -2562,7 +2572,7 @@ async function handlePanel(interaction) {
         if (op === 'season') {
           const n = Object.keys(db.tribes).length;
           return interaction.reply({
-            content: `⚠️ **End the season?**\nThis will permanently delete the **entire leaderboard** (**${n}** tribe${n === 1 ? '' : 's'}). It cannot be undone.`,
+            content: `⚠ **End the season?**\nThis will permanently delete the **entire leaderboard** (**${n}** tribe${n === 1 ? '' : 's'}). It cannot be undone.`,
             components: [row(btn('season:confirm', 'Yes, delete everything', ButtonStyle.Danger), btn('season:cancel', 'Cancel'))],
             ephemeral: true
           });
@@ -2630,8 +2640,7 @@ async function handlePanel(interaction) {
       }
       case 'hset': {
         const key = args[0];
-        if (key === 'verify') cfg.hype.verifyChannelId = chId;
-        else if (key === 'gchan') cfg.hype.giveawayChannelId = chId;
+        if (key === 'gchan') cfg.hype.giveawayChannelId = chId;
         else return deny();
         saveDB();
         await refreshHypePost(guild);
@@ -2639,7 +2648,7 @@ async function handlePanel(interaction) {
       }
       case 'hpostch': {
         const h = cfg.hype;
-        if (!h.strictName || !h.roleId) return show('hpost', [], 'Set the name (Settings) and the role (Role & channels) first.');
+        if (!h.name || !h.roleId) return show('hpost', [], 'Set the name (Settings) and the role (Role & channels) first.');
         if (!chan?.isTextBased()) return show('hpost', [], 'Pick a text channel.');
         try {
           const msg = await chan.send({ embeds: [hypeEmbed()] });
@@ -2678,7 +2687,7 @@ async function handlePanel(interaction) {
       saveDB();
       addAudit(guild.id, user.id, 'autorole_set', { roleId: role.id });
       const me = guild.members.me;
-      const warn = me && role.comparePositionTo(me.roles.highest) >= 0 ? ' ⚠️ My role must be ABOVE that role, otherwise I cannot give it.' : '';
+      const warn = me && role.comparePositionTo(me.roles.highest) >= 0 ? ' ⚠ My role must be ABOVE that role, otherwise I cannot give it.' : '';
       return show('roles', ['auto:autorole'], `Autorole set to <@&${role.id}>.${warn}`);
     }
     if (token === 'rlset') {
@@ -2710,42 +2719,31 @@ async function handlePanel(interaction) {
   return deny();
 }
 
-// ---------- COMMANDS ----------
+// ---------- COMMANDS (global: they exist in every server) ----------
 const commands = [
   new SlashCommandBuilder().setName('panel').setDescription('Open the control panel'),
   new SlashCommandBuilder().setName('help').setDescription('Explains the panel and what everyone can do'),
   new SlashCommandBuilder().setName('open-mystery-box').setDescription('Open one mystery box from your inventory'),
-  ...nitradoCommands
-].map(c => c.toJSON());
-
-// developer-only commands: registered ONLY in your home server
-const homeCommands = [
-  new SlashCommandBuilder().setName('authorize').setDescription('Authorize a server to use this bot (developer only)')
-    .addStringOption(o => o.setName('server').setDescription('Server the bot is in').setRequired(true).setAutocomplete(true))
-    .addIntegerOption(o => o.setName('days').setDescription('Authorize for this many days (empty = no expiry)').setMinValue(1).setMaxValue(3650))
-    .addStringOption(o => o.setName('note').setDescription('Note, e.g. who paid').setMaxLength(200)),
-  new SlashCommandBuilder().setName('deauthorize').setDescription('Remove a server\'s authorization (developer only)')
-    .addStringOption(o => o.setName('server').setDescription('Authorized server').setRequired(true).setAutocomplete(true))
-    .addBooleanOption(o => o.setName('leave').setDescription('Make the bot leave that server'))
-    .addBooleanOption(o => o.setName('delete_data').setDescription('Also delete all of that server\'s data')),
-  new SlashCommandBuilder().setName('authorized').setDescription('List all authorized servers (developer only)')
-
+  ...nitradoCommands,
+  ...adminSearchCommands
+].map(c => (typeof c.toJSON === 'function' ? c.toJSON() : c));
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  // normal commands exist in every server; they are checked for authorization when used
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-  // developer commands ONLY in the control server
-  for (const cid of CONTROL_GUILD_IDS) {
+}
+
+// removes the old per-server /authorize, /deauthorize and /authorized commands left over from earlier versions
+async function cleanupOldGuildCommands() {
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+  const OLD = new Set(['authorize', 'deauthorize', 'authorized']);
+  for (const g of client.guilds.cache.values()) {
     try {
-      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, cid), { body: homeCommands });
-    } catch (e) {
-      console.error(`Could not register /authorize commands in server ${cid} (is the bot in it?):`, e.message);
-    }
-  }
-  // clear the old per-server command list of the home server so nothing is left over there
-  if (!isControl(GUILD_ID)) {
-    try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] }); } catch {}
+      const list = await rest.get(Routes.applicationGuildCommands(CLIENT_ID, g.id));
+      for (const c of list) {
+        if (OLD.has(c.name)) await rest.delete(Routes.applicationGuildCommand(CLIENT_ID, g.id, c.id)).catch(() => {});
+      }
+    } catch {}
   }
 }
 
@@ -2756,6 +2754,7 @@ const onReady = async () => { try {
   if (started) return;
   started = true;
   console.log(`Logged in as ${client.user.tag}`);
+  await loadAppOwners();
   applyStatus();
   try {
     await registerCommands();
@@ -2763,8 +2762,8 @@ const onReady = async () => { try {
   } catch (e) {
     console.error('Command registration failed:', e);
   }
+  cleanupOldGuildCommands().catch(() => {});
   for (const guild of client.guilds.cache.values()) {
-    if (!isAuthorized(guild.id)) continue;
     await runIn(guild, async () => {
       seedPerms(guild);
       await refreshLeaderboard(guild);
@@ -2772,13 +2771,13 @@ const onReady = async () => { try {
   }
   setInterval(async () => {
     for (const guild of client.guilds.cache.values()) {
-      if (isAuthorized(guild.id)) await runIn(guild, () => refreshLeaderboard(guild)).catch(() => {});
+      await runIn(guild, () => refreshLeaderboard(guild)).catch(() => {});
     }
   }, 180000);
   setInterval(() => sweepTimers().catch(e => console.error('sweep', e)), 30000);
   setTimeout(async () => {
     for (const g of client.guilds.cache.values()) {
-      if (isAuthorized(g.id)) await g.members.fetch().catch(e => console.warn(`Could not load the members of ${g.name}: ${e.message}`));
+      await g.members.fetch().catch(e => console.warn(`Could not load the members of ${g.name}: ${e.message}`));
     }
     hypeSweep().catch(e => console.error('hype sweep', e));
   }, 5000);
@@ -2800,9 +2799,9 @@ client.on('interactionCreate', async interaction => {
     console.error('Interaction error:', err);
     try {
       if (interaction.isRepliable?.() && (interaction.deferred || interaction.replied)) {
-        await interaction.followUp({ content: 'Something went wrong. Check the bot logs.', ephemeral: true });
+        await interaction.followUp({ content: errText(err), ephemeral: true });
       } else if (interaction.isRepliable?.()) {
-        await interaction.reply({ content: 'Something went wrong. Check the bot logs.', ephemeral: true });
+        await interaction.reply({ content: errText(err), ephemeral: true });
       }
     } catch {}
   }
@@ -2813,30 +2812,21 @@ async function handleInteraction(interaction) {
     const guild = interaction.guild;
     const member = interaction.member;
 
-    // ---- authorization gate: servers that are not authorized only get the notice ----
-    if (!isAuthorized(guild.id)) {
-      if (interaction.isAutocomplete()) return interaction.respond([]);
-      return interaction.reply({ embeds: [unauthorizedEmbed()] });
-    }
     seedPerms(guild);
-
 
     // the control panel: every button, menu and form that starts with pnl
     if (interaction.customId && (interaction.customId.startsWith('pnl:') || interaction.customId.startsWith('pnlm:'))) return handlePanel(interaction);
 
-    // AUTOCOMPLETE (developer commands only)
-    if (interaction.isAutocomplete()) {
-      const f = interaction.options.getFocused(true);
-      const q = String(f.value).toLowerCase();
-      if (interaction.commandName === 'authorize' || interaction.commandName === 'deauthorize') {
-        if (!isControl(guild.id) || !isBotOwner(interaction.user, guild)) return interaction.respond([]);
-        const pool = interaction.commandName === 'authorize'
-          ? [...client.guilds.cache.values()].filter(g => g.id !== GUILD_ID && !isControl(g.id))
-          : Object.keys(root.auth).map(id => client.guilds.cache.get(id) || { id, name: root.auth[id].name || id });
-        return interaction.respond(pool.filter(g => g.name.toLowerCase().includes(q)).slice(0, 25).map(g => ({ name: clip(`${g.name} (${g.id})`, 100), value: g.id })));
+    // Nitrado buttons and dropdowns (bot developer only: they control the developer's own ARK servers)
+    if (interaction.customId?.startsWith('nit:') && (interaction.isButton() || interaction.isStringSelectMenu())) {
+      if (!isBotOwner(interaction.user)) {
+        return interaction.reply({ content: 'This is only available to the bot developer.', ephemeral: true });
       }
-      return interaction.respond([]);
+      if (await handleNitradoComponent(interaction, true)) return;
     }
+
+    // AUTOCOMPLETE (nothing to suggest)
+    if (interaction.isAutocomplete()) return interaction.respond([]);
 
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'help') {
@@ -2848,57 +2838,15 @@ async function handleInteraction(interaction) {
       }
 
       if (interaction.commandName === 'open-mystery-box') return handleOpenMysteryBox(interaction);
-if (await handleNitradoCommand(interaction, isOwner(member))) return;
-      // /authorize, /deauthorize, /authorized — developer only, home server only
-      if (['authorize', 'deauthorize', 'authorized'].includes(interaction.commandName)) {
-        if (!isControl(guild.id) || !isBotOwner(interaction.user, guild)) {
-          return interaction.reply({ content: 'This command is only for the bot developer, in the control server.', ephemeral: true });
-        }
-        await interaction.deferReply({ ephemeral: true });
-        const resolveGuild = raw => {
-          const v = String(raw || '').trim();
-          return client.guilds.cache.get(v) || client.guilds.cache.find(g => g.name.toLowerCase() === v.toLowerCase()) || null;
-        };
 
-        if (interaction.commandName === 'authorize') {
-          const target = resolveGuild(interaction.options.getString('server', true));
-          if (!target) return interaction.editReply('The bot is not in that server. Invite the bot there first, then try again.');
-          if (target.id === GUILD_ID || isControl(target.id)) return interaction.editReply('The home and control servers are always authorized.');
-          const days = interaction.options.getInteger('days');
-          const expiresAt = days ? new Date(Date.now() + days * 86400000).toISOString() : null;
-          root.auth[target.id] = { name: target.name, at: stamp(), expiresAt, note: interaction.options.getString('note') || '', by: interaction.user.id };
-          guildData(target.id, true);
-          saveDB();
-          await runIn(target, async () => {
-            seedPerms(target);
-            await refreshLeaderboard(target);
-          });
-          return interaction.editReply(`✅ **${target.name}** is now authorized${expiresAt ? ` until <t:${Math.floor(Date.parse(expiresAt) / 1000)}:F>` : ' with no expiry'}.\nThe server owner can set up roles with \`/perms\`.`);
+      // Nitrado commands: bot developer only (they control the developer's own ARK servers)
+      const NIT_CMDS = new Set(nitradoCommands.map(c => c.name));
+      if (NIT_CMDS.has(interaction.commandName)) {
+        if (!isBotOwner(interaction.user)) {
+          return interaction.reply({ content: 'This command is only available to the bot developer.', ephemeral: true });
         }
-
-        if (interaction.commandName === 'deauthorize') {
-          const raw = interaction.options.getString('server', true);
-          const target = resolveGuild(raw);
-          const gid = target?.id || (/^\d{17,20}$/.test(raw.trim()) ? raw.trim() : null);
-          if (!gid || !root.auth[gid]) return interaction.editReply('That server is not on the authorized list.');
-          const name = root.auth[gid].name || target?.name || gid;
-          delete root.auth[gid];
-          if (interaction.options.getBoolean('delete_data')) delete root.guilds[gid];
-          saveDB();
-          let left = false;
-          if (interaction.options.getBoolean('leave') && target) left = await target.leave().then(() => true).catch(() => false);
-          return interaction.editReply(`⛔ **${name}** is no longer authorized.${left ? ' The bot left that server.' : ''}${interaction.options.getBoolean('delete_data') ? ' Its data was deleted.' : ' Its data was kept.'}`);
-        }
-
-        const entries = Object.entries(root.auth);
-        const lines = entries.map(([gid, a]) => {
-          const live = client.guilds.cache.get(gid);
-          const exp = a.expiresAt ? (Date.parse(a.expiresAt) > Date.now() ? `expires <t:${Math.floor(Date.parse(a.expiresAt) / 1000)}:R>` : '**expired**') : 'no expiry';
-          return `• **${live?.name || a.name || gid}** (\`${gid}\`) — ${exp}${a.note ? ` — ${clip(a.note, 80)}` : ''}${live ? '' : ' — _bot not in server_'}`;
-        });
-        return interaction.editReply({ embeds: [embed('🔑 Authorized servers', clip(lines.join('\n') || 'No servers authorized yet (the home server is always allowed).', 4000))] });
+        if (await handleNitradoCommand(interaction, true)) return;
       }
-
     }
 
     // STRING SELECT
@@ -3094,7 +3042,9 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
           if (previous) {
             const prev = staffRec(previous);
             prev.handling = Math.max(0, prev.handling - 1);
-            await postStaffStats(guild, previous);
+            // the previous claimant is no longer paid for this ticket (only if that claim is still in their unpaid period)
+            const lastClaim = [...(ticket.claimHistory || [])].reverse().find(x => x.userId === previous);
+            if (lastClaim && Date.parse(lastClaim.at) >= (Date.parse(prev.period.since) || 0) && (prev.period.byType[ticket.typeKey] || 0) > 0) prev.period.byType[ticket.typeKey]--;
           }
           ticket.claimantId = interaction.user.id;
           ticket.claimHistory ||= [];
@@ -3106,8 +3056,11 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
           s.period.byType[ticket.typeKey] = (s.period.byType[ticket.typeKey] || 0) + 1;
           saveDB();
           addAudit(guild.id, interaction.user.id, 'ticket_claimed', { ticketId, previousClaimant: previous, type: ticket.typeName });
-          await postStaffStats(guild, interaction.user.id, `**Claimed ticket**\nType: ${ticket.typeName}\nTicket payment: $${Number(ticket.price ?? db.config.ticketPrice).toFixed(2)}\nOwner: <@${ticket.ownerId}>\nChannel: <#${ticket.channelId}>\nAt: ${stamp()}`);
-          return interaction.reply({ content: `Ticket claimed by ${interaction.user}.`, allowedMentions: { users: [interaction.user.id] } });
+          await interaction.reply({ content: `Ticket claimed by ${interaction.user}.`, allowedMentions: { users: [interaction.user.id] } });
+          // forum updates can take a few seconds, so they run after the reply (Discord only waits 3 seconds)
+          if (previous) postStaffStats(guild, previous);
+          postStaffStats(guild, interaction.user.id, `**Claimed ticket**\nType: ${ticket.typeName}\nTicket payment: $${Number(ticket.price ?? db.config.ticketPrice).toFixed(2)}\nOwner: <@${ticket.ownerId}>\nChannel: <#${ticket.channelId}>\nAt: ${stamp()}`);
+          return;
         }
 
         if (action === 'adduser') {
@@ -3138,7 +3091,7 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
       if (id.startsWith('ec:')) {
         if (!canUseEmbedCreator(member)) return interaction.reply({ content: 'No permission.', ephemeral: true });
         const d = embedDrafts.get(interaction.user.id);
-        if (!d) return interaction.reply({ content: 'Draft expired. Run /embed-creator again.', ephemeral: true });
+        if (!d) return interaction.reply({ content: 'Draft expired. Open /panel → Embeds again.', ephemeral: true });
 
         if (id === 'ec:main') {
           return interaction.showModal(modal('ec:mainmodal', 'Embed Main', [
@@ -3243,7 +3196,7 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
         // Settings page 2/2 (roles)
         if (id === 'td:roles') {
           return interaction.update({
-            content: '**Ticket settings (2/2 — Roles)**\nTip: `/perms` lets you give any role any ability.',
+            content: '**Ticket settings (2/2 — Roles)**\nTip: give other roles abilities in `/panel` → Roles.',
             components: [
               row(new RoleSelectMenuBuilder().setCustomId('td:staffroles').setPlaceholder('Select ticket staff roles').setMinValues(0).setMaxValues(10)),
               row(new RoleSelectMenuBuilder().setCustomId('td:ownerroles').setPlaceholder('Select owner roles').setMinValues(0).setMaxValues(10)),
@@ -3488,7 +3441,7 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
       if (interaction.customId === 'ec:channel') {
         if (!canUseEmbedCreator(member)) return interaction.reply({ content: 'No permission.', ephemeral: true });
         const d = embedDrafts.get(interaction.user.id);
-        if (!d) return interaction.reply({ content: 'Draft expired. Run /embed-creator again.', ephemeral: true });
+        if (!d) return interaction.reply({ content: 'Draft expired. Open /panel → Embeds again.', ephemeral: true });
         const ch = guild.channels.cache.get(interaction.values[0]);
         if (!ch?.isTextBased()) return interaction.reply({ content: 'Invalid channel.', ephemeral: true });
         try {
@@ -3600,7 +3553,7 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
       if (interaction.customId.startsWith('ec:')) {
         if (!canUseEmbedCreator(member)) return interaction.reply({ content: 'No permission.', ephemeral: true });
         const d = embedDrafts.get(interaction.user.id);
-        if (!d) return interaction.reply({ content: 'Draft expired. Run /embed-creator again.', ephemeral: true });
+        if (!d) return interaction.reply({ content: 'Draft expired. Open /panel → Embeds again.', ephemeral: true });
         const f = k => interaction.fields.getTextInputValue(k)?.trim() || '';
 
         if (interaction.customId === 'ec:mainmodal') {
@@ -3683,7 +3636,7 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
         saveDB();
         addAudit(guild.id, interaction.user.id, 'ticket_type_added', { key, name });
         await refreshPanel(guild);
-        return interaction.reply({ content: `Added ticket option **${name}** (\`${key}\`). Use \`/panel option-edit\` to give it an emoji.`, ephemeral: true });
+        return interaction.reply({ content: `Added ticket option **${name}** (\`${key}\`). Use \`/panel\` → Tickets → Ticket options to give it an emoji.`, ephemeral: true });
       }
       if (interaction.customId === 'ld:addmodal') {
         if (!canEditLeaderboard(member)) return interaction.reply({ content: 'No permission.', ephemeral: true });
@@ -3806,9 +3759,9 @@ if (await handleNitradoCommand(interaction, isOwner(member))) return;
   } catch (err) {
     console.error('Interaction error:', err);
     if (interaction.isRepliable && interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: 'Something went wrong. Check the bot logs.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: errText(err), ephemeral: true }).catch(() => {});
     } else if (interaction.isRepliable && interaction.isRepliable() && interaction.deferred) {
-      await interaction.editReply('Something went wrong. Check the bot logs.').catch(() => {});
+      await interaction.editReply(errText(err)).catch(() => {});
     }
   }
 }
@@ -3846,17 +3799,12 @@ async function handleOpenMysteryBox(interaction) {
   });
 }
 
-// ---------- MESSAGES: !wipe, hype squad verification, ticket activity ----------
+// ---------- MESSAGES: !wipe, image uploads, hype squad, ticket activity ----------
 client.on('messageCreate', async message => {
   if (!message.guild || message.author.bot) return;
   return runIn(message.guild, async () => {
     try {
-      const isWipe = /^!wipe\b/i.test(message.content.trim());
-      if (!isAuthorized(message.guild.id)) {
-        if (isWipe) await wipeReply(message, true);
-        return;
-      }
-      if (isWipe) { await wipeReply(message, false); return; }
+      if (/^!wipe\b/i.test(message.content.trim())) { await wipeReply(message); return; }
       const upKey = `${message.guild.id}:${message.author.id}`;
       const pu = pendingUploads.get(upKey);
       if (pu) {
@@ -3885,7 +3833,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
     if (reaction.partial) await reaction.fetch().catch(() => null);
     const message = reaction.message.partial ? await reaction.message.fetch().catch(() => null) : reaction.message;
-    if (!message?.guild || !isAuthorized(message.guild.id)) return;
+    if (!message?.guild) return;
     await runIn(message.guild, async () => {
       const p = db.polls[message.id];
       if (!p || p.ended) return;
@@ -3908,7 +3856,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
 // ---------- HYPE SQUAD: react the moment a nickname changes ----------
 client.on('guildMemberUpdate', async (_oldMember, newMember) => {
   try {
-    if (!isAuthorized(newMember.guild.id)) return;
     await runIn(newMember.guild, () => syncHypeMember(newMember));
   } catch (e) {
     console.error('guildMemberUpdate error:', e);
@@ -3916,7 +3863,6 @@ client.on('guildMemberUpdate', async (_oldMember, newMember) => {
 });
 client.on('guildMemberAdd', async member => {
   try {
-    if (!isAuthorized(member.guild.id)) return;
     await runIn(member.guild, () => syncHypeMember(member));
   } catch (e) {
     console.error('hype join error:', e);
@@ -3928,7 +3874,6 @@ client.on('guildMemberAdd', async member => {
 client.on('guildMemberAdd', async member => {
   try {
     const guild = member.guild;
-    if (!isAuthorized(guild.id)) return;
     await runIn(guild, async () => {
       const ar = db.config.autorole;
       if (!ar?.enabled || !ar.roleId) return;
@@ -3951,4 +3896,4 @@ client.on('guildMemberAdd', async member => {
 client.login(TOKEN).catch(err => {
   console.error('Login failed. Verify TOKEN.', err);
   process.exit(1);
-});p
+});
